@@ -1,0 +1,18 @@
+Bypass D盾_IIS防火墙SQL注入防御(多姿势)
+教学网址：https://www.cnblogs.com/xiaozi/p/7357937.html 
+
+Bypass 360主机卫士SQL注入防御（多姿势）:
+教学网址：https://www.cnblogs.com/xiaozi/p/9132737.html 
+
+Bypass ngx_lua_waf SQL注入防御（多姿势）:
+教学网址：https://www.cnblogs.com/xiaozi/p/9138126.html
+
+Bypass X-WAF SQL注入防御（多姿势） 
+教学网址：https://www.cnblogs.com/xiaozi/p/9132409.html 
+
+
+Bypass 护卫神SQL注入防御（多姿势）
+教学网址：https://www.cnblogs.com/xiaozi/p/9138160.html 
+
+   打破基于OpenResty的WEB安全防护（CVE-2018-9230）
+教学网址：https://www.anquanke.com/post/id/103771 
