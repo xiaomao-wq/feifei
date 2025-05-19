@@ -1,0 +1,7 @@
+windows服务排查：
+对话框输入，services.msc打开服务窗口
+
+linux服务排查：
+使用service--status-all命令，可查看所有服务的状态
+也可以使用systemct | more命令进行查看
+查看服务是否开机自启动systemctl list-unit-files
