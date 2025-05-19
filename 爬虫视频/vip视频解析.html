@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>视频链接解析器</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: white; color: black; }
+        .container { width: 500px; margin: 0 auto; padding-top: 20px; }
+        .input-group, .radio-group { margin-bottom: 10px; }
+        .input-group label, .input-group .entry, .radio-group label { display: inline-block; vertical-align: middle; }
+        .input-group label { width: 150px; }
+        .entry { width: 300px; }
+        .button { margin-top: 10px; }
+        .night-mode { background-color: black; color: white; }
+        .night-mode input, .night-mode button, .night-mode label { background-color: black; color: white; }
+        iframe { width: 100%; height: 500px; border: 1px solid #ccc; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <p>点击 <a href="https://v.qq.com/" target="_blank">这里</a> 腾讯视频</p><p>点击 <a href="https://www.iqiyi.com/" target="_blank">这里</a> 爱奇艺</p><p>点击 <a href="https://www.bilibili.com/" target="_blank">这里</a> 哔哩哔哩</p><p>点击 <a href="https://www.youku.com/" target="_blank">这里</a>优酷</p><p>点击 <a href="https://www.mgtv.com/" target="_blank">这里</a>芒果</p>
+    <p>点击 <a href="https://www.acfun.cn/" target="_blank">这里</a> A站视频</p>
+    <div class="container">
+        <div class="input-group">
+            <label for="videoUrl">请输入视频网址:</label>
+            <input type="text" id="videoUrl" class="entry">
+        </div>
+        <div class="radio-group">
+            <label>选择解析接口:</label>
+            <label><input type="radio" name="api" value="https://jx.xyflv.cc/?url=" checked>咸鱼</label>
+            <label><input type="radio" name="api" value="https://jx.5566jiexi.com/?url=">5566</label>
+            <label><input type="radio" name="api" value="https://jx.xmflv.com/?url=">虾米</label>
+            <label><input type="radio" name="api" value="https://am1907.top/?jx=">M1907(可输名字)</label>
+            <label><input type="radio" name="api" value="https://vip.bljiex.com/?v=">BL</label>
+            <label><input type="radio" name="api" value="https://jx.mmkv.cn/tv.php?url=">vip</label>
+            <label><input type="radio" name="api" value="https://jx.2s0.cn/player/?url=">极速</label>
+            <label><input type="radio" name="api" value="https://www.yemu.xyz/?url=">夜幕</label>
+            <label><input type="radio" name="api" value="https://t1.qlplayer.cyou/player/?url=">麒麟</label>
+        </div>
+        <button id="parseButton" class="button" onclick="parseVideo()">解析</button>
+        <button id="nightModeButton" class="button" onclick="toggleNightMode()">开启黑夜模式</button>
+        <button id="fullscreenButton" class="button" onclick="toggleFullscreen()">全屏显示</button>
+        <iframe id="resultFrame" src=""></iframe>
+    </div>
+
+    <script>
+        let isNightMode = false;
+
+        function parseVideo() {
+            var videoUrl = document.getElementById('videoUrl').value.trim();
+            var apiRadios = document.getElementsByName('api');
+            var selectedApi = '';
+            for (var i = 0; i < apiRadios.length; i++) {
+                if (apiRadios[i].checked) {
+                    selectedApi = apiRadios[i].value;
+                    break;
+                }
+            }
+
+            if (!videoUrl) {
+                alert('请输入视频网址');
+                return;
+            }
+
+            var apiUrl = selectedApi + encodeURIComponent(videoUrl);
+            document.getElementById('resultFrame').src = apiUrl;
+        }
+
+        function toggleNightMode() {
+            isNightMode = !isNightMode;
+            document.body.classList.toggle('night-mode', isNightMode);
+            const nightModeButton = document.getElementById('nightModeButton');
+            nightModeButton.textContent = isNightMode ? '关闭黑夜模式' : '开启黑夜模式';
+        }
+
+        function toggleFullscreen() {
+            var iframe = document.getElementById('resultFrame');
+            if (iframe.requestFullscreen) {
+                iframe.requestFullscreen();
+            } else if (iframe.mozRequestFullScreen) { // Firefox
+                iframe.mozRequestFullScreen();
+            } else if (iframe.webkitRequestFullscreen) { // Chrome, Safari and Opera
+                iframe.webkitRequestFullscreen();
+            } else if (iframe.msRequestFullscreen) { // IE/Edge
+                iframe.msRequestFullscreen();
+            }
+        }
+    </script>
+</body>
+</html>
