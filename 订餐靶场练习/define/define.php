@@ -1,0 +1,17 @@
+<?php
+header("Content-type:text/html;charset=utf-8");
+define("LOGIN","../views/login.php?file=../common/header.php");
+define("REG","../views/register.php");
+define("INDEX","../index.php");
+define("UPLOAD","../upload/");
+define("SHOP","../views/shop.php");
+define("MEMBER","../views/user_account.php");
+define("ADDRESS","../views/user_address.php");
+define("CART","../views/cart.php");
+define("FAVORITE","../views/user_favorites.php");
+define("ORDER","../views/confirm_order.php");
+define("ORDERS","../views/pay_order.php");
+define("UORDER","../views/user_order.php");
+define("ORDERLIST","../views/user_orderlist.php");
+define("PAY","../views/pay.php");
+define("COMMENT","../views/user_comment.php");
