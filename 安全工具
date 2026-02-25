@@ -1,1 +1,4379 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, filedialog, Toplevel
+import os
+import sys
+import threading
+import asyncio
+import aiohttp
+import socket
+import dns.resolver
+import time
+import queue
+import base64
+import binascii
+import hashlib
+import json
+import xml.etree.ElementTree as ET
+from urllib.parse import urljoin, urlparse, quote, unquote
+import html
+import requests
+import subprocess
+from datetime import datetime
+import concurrent.futures
+from Crypto.Cipher import AES, PKCS1_OAEP
+from Crypto.PublicKey import RSA
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
+import ipaddress
+import zipfile
+from PIL import Image, ImageTk, ImageOps, ImageFilter
+import io
+import shutil
+import webbrowser
+import re
+import csv
+from openpyxl import load_workbook
+import glob
+# ==================== IP提取工具脚本 ====================
+# -*- coding: utf-8 -*-
+import os
+import re
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk, scrolledtext, font
+import zipfile
+import xml.etree.ElementTree as ET
+from datetime import datetime
+import ipaddress
+import csv
 
+# 定义全局样式
+BG_COLOR = "#f0f0f0"
+BUTTON_COLOR = "#4CAF50"
+BUTTON_HOVER = "#45a049"
+T_TEXT_COLOR = "#333333"
+FRAME_COLOR = "#ffffff"
+TAB_COLOR = "#e9e9e9"
+
+
+class ExcelReader:
+    @staticmethod
+    def read_excel(file_path):
+        try:
+            with zipfile.ZipFile(file_path) as z:
+                with z.open('xl/sharedStrings.xml') as f:
+                    tree = ET.parse(f)
+                    root = tree.getroot()
+                    texts = [''.join(t.text for t in si.iter() if t.text)
+                             for si in root.findall('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si')]
+                    return ' '.join(texts)
+        except Exception as e:
+            raise Exception(f"读取Excel文件失败: {str(e)}")
+
+    @staticmethod
+    def to_excel(data, file_path):
+        try:
+            header = "指令源,指令号,类型,IP/网段,下发时间,当天值班人员\n"
+            rows = [
+                f"{data['source']},{data['order_num']},{data['ip_type']},{ip},{data['issue_time']},{data['staff']}\n"
+                for ip in data['ips']]
+            with open(file_path, 'w', encoding='utf-8-sig') as f:
+                f.write(header + ''.join(rows))
+            return True
+        except Exception as e:
+            raise Exception(f"生成文件失败: {str(e)}")
+
+    @staticmethod
+    def read_column_a(file_path):
+        """读取文件的A列内容（除去标题行）"""
+        content_lines = []
+        try:
+            # 处理Excel文件
+            if file_path.endswith('.xlsx'):
+                with zipfile.ZipFile(file_path) as z:
+                    # 获取第一个工作表
+                    sheet_files = [name for name in z.namelist() if name.startswith('xl/worksheets/sheet')]
+                    if not sheet_files:
+                        raise Exception("未找到工作表")
+                    sheet_files.sort()
+                    sheet_path = sheet_files[0]
+
+                    # 读取sharedStrings.xml
+                    shared_strings = []
+                    if 'xl/sharedStrings.xml' in z.namelist():
+                        with z.open('xl/sharedStrings.xml') as strings_file:
+                            strings_tree = ET.parse(strings_file)
+                            strings_root = strings_tree.getroot()
+                            ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                            for si in strings_root.findall('ns:si', ns):
+                                texts = [t.text for t in si.findall('.//ns:t', ns) if t.text]
+                                shared_strings.append(''.join(texts))
+
+                    # 读取工作表内容
+                    with z.open(sheet_path) as f:
+                        tree = ET.parse(f)
+                        root = tree.getroot()
+                        ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                        rows = root.findall('.//ns:row', ns)
+                        # 跳过第一行（标题行）
+                        for row in rows[1:]:
+                            # 查找A列单元格
+                            a_cell = None
+                            for cell in row.findall('ns:c', ns):
+                                cell_r = cell.get('r')
+                                if cell_r and cell_r.startswith('A'):
+                                    a_cell = cell
+                                    break
+                            if a_cell is None:
+                                continue
+                            # 获取单元格的值
+                            value_elem = a_cell.find('ns:v', ns)
+                            if value_elem is None or value_elem.text is None:
+                                continue
+                            value = value_elem.text
+                            # 如果是共享字符串类型
+                            if a_cell.get('t') == 's':
+                                try:
+                                    idx = int(value)
+                                    value = shared_strings[idx]
+                                except (ValueError, IndexError):
+                                    pass
+                            content_lines.append(value.strip())
+
+            # 处理文本文件（.txt, .csv等）
+            else:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    # 跳过第一行（标题行）
+                    for line in lines[1:]:
+                        # 如果是CSV，按逗号分割取第一列
+                        if file_path.endswith('.csv'):
+                            parts = line.split(',')
+                            if parts:
+                                content_lines.append(parts[0].strip())
+                        else:  # 其他文本文件，直接取整行
+                            content_lines.append(line.strip())
+        except Exception as e:
+            raise Exception(f"读取文件A列内容失败: {str(e)}")
+        return content_lines
+
+
+def extract_ips(text):
+    ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b'
+    return re.findall(ip_pattern, text)
+
+
+def filter_ips_by_whitelist(ips, whitelist):
+    if not whitelist:
+        return ips, []
+    whitelist_ips = [ip.strip() for ip in whitelist.split('\n') if ip.strip()]
+    filtered_ips = []
+    matched_ips = []
+    for ip in ips:
+        if not any(w_ip in ip for w_ip in whitelist_ips):
+            filtered_ips.append(ip)
+        else:
+            matched_ips.append(ip)
+    return filtered_ips, matched_ips
+
+
+class TabbedIPExtractorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("IP提取工具")
+        self.root.geometry("1200x900")
+        self.root.configure(bg=BG_COLOR)
+
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('TNotebook', background=TAB_COLOR)
+        style.configure('TNotebook.Tab', background=TAB_COLOR, padding=[10, 5])
+        style.map('TNotebook.Tab', background=[('selected', FRAME_COLOR)])
+
+        self.main_frame = tk.Frame(root, bg=BG_COLOR)
+        self.main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.tab_control = ttk.Notebook(self.main_frame)
+        self.tab_control.pack(expand=1, fill="both")
+
+        self.multi_tab = self.create_scrollable_tab("多文件导入")
+        self.merge_tab = self.create_tab("文件合并")
+        self.whitelist_tab = self.create_tab("白名单过滤")
+        self.blacklist_tab = self.create_tab("IP黑名单转换工具")
+        self.unblock_tab = self.create_tab("解封IP过滤")  # 新增解封IP过滤标签页
+
+        self.tab_control.add(self.multi_tab['frame'], text='多文件导入')
+        self.tab_control.add(self.merge_tab, text='文件合并')
+        self.tab_control.add(self.whitelist_tab, text='白名单过滤')
+        self.tab_control.add(self.blacklist_tab, text='IP黑名单转换工具')
+        self.tab_control.add(self.unblock_tab, text='解封IP过滤')  # 添加到标签控制
+
+        self.init_multi_tab()
+        self.init_merge_tab()
+        self.init_whitelist_tab()
+        self.init_blacklist_tab()
+        self.init_unblock_tab()  # 初始化解封IP过滤标签页
+
+    def create_tab(self, tab_name):
+        return ttk.Frame(self.tab_control, style='TFrame')
+
+    def create_scrollable_tab(self, tab_name):
+        tab_frame = ttk.Frame(self.tab_control, style='TFrame')
+        canvas = tk.Canvas(tab_frame, bg=FRAME_COLOR, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame')
+
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+        return {'frame': tab_frame, 'canvas': canvas, 'scrollbar': scrollbar, 'content_frame': scrollable_frame}
+
+    def init_multi_tab(self):
+        frame = self.multi_tab['content_frame']
+
+        title_frame = tk.Frame(frame, bg=FRAME_COLOR)
+        title_frame.pack(fill="x", pady=(10, 0))
+        tk.Label(title_frame, text="多文件导入", font=('Microsoft YaHei', 12, 'bold'), bg=FRAME_COLOR,
+                 fg=T_TEXT_COLOR).pack(side="left", padx=10)
+
+        # 添加清空所有输入按钮
+        tk.Button(title_frame, text="清空所有输入", command=self.clear_all_inputs,
+                  bg="#f44336", fg="white", font=('Microsoft YaHei', 10), padx=10, pady=5).pack(side="right", padx=5)
+
+        tk.Button(title_frame, text="合并导出", command=self.multi_merge_files,
+                  bg=BUTTON_COLOR, fg="white", font=('Microsoft YaHei', 10), padx=10, pady=5).pack(side="right",
+                                                                                                   padx=10)
+
+        # 添加全局值班人员输入框
+        staff_frame = tk.Frame(frame, bg=FRAME_COLOR)
+        staff_frame.pack(fill="x", padx=20, pady=(5, 10))
+        tk.Label(staff_frame, text="值班人员:", font=('Microsoft YaHei', 9), fg=T_TEXT_COLOR, bg=FRAME_COLOR).pack(
+            side="left")
+        self.global_staff_entry = tk.Entry(staff_frame, width=25, font=('Microsoft YaHei', 9), relief=tk.FLAT,
+                                           highlightthickness=1,
+                                           highlightbackground="#ccc")
+        self.global_staff_entry.pack(side="left", padx=(5, 0))
+
+        whitelist_frame = ttk.LabelFrame(frame, text="白名单IP地址 (每行一个IP)", padding=15)
+        whitelist_frame.pack(fill="both", expand=True, padx=20, pady=15)
+        self.whitelist_text = scrolledtext.ScrolledText(whitelist_frame, height=8, wrap=tk.NONE, font=('Consolas', 10),
+                                                        padx=15, pady=15)
+        self.whitelist_text.pack(fill="both", expand=True)
+
+        matched_ips_frame = ttk.LabelFrame(frame, text="匹配到的白名单IP", padding=15)
+        matched_ips_frame.pack(fill="both", expand=True, padx=20, pady=15)
+        self.matched_ips_text = scrolledtext.ScrolledText(matched_ips_frame, height=8, wrap=tk.NONE,
+                                                          font=('Consolas', 10), padx=15, pady=15, state='disabled')
+        self.matched_ips_text.pack(fill="both", expand=True)
+
+        self.multi_panels = []
+        # 将文件导入数量从10增加到30
+        for i in range(30):  # 修改这里：range(10) -> range(30)
+            panel = self.create_multi_panel(frame, i)
+            self.multi_panels.append(panel)
+
+    def clear_all_inputs(self):
+        """清空所有30个面板的输入"""
+        for i in range(30):
+            self.clear_panel_input(i)
+        # 清空白名单文本框
+        self.whitelist_text.delete('1.0', tk.END)
+        # 清空匹配到的白名单文本框
+        self.matched_ips_text.config(state='normal')
+        self.matched_ips_text.delete('1.0', tk.END)
+        self.matched_ips_text.config(state='disabled')
+        # 清空值班人员输入
+        self.global_staff_entry.delete(0, tk.END)
+
+    def create_multi_panel(self, parent_frame, index):
+        frame = ttk.LabelFrame(parent_frame, text=f"文件导入 {index + 1}", padding=15, style='TLabelframe')
+        frame.pack(fill="x", padx=10, pady=5)
+
+        # 创建按钮框架
+        button_frame = tk.Frame(frame, bg=FRAME_COLOR)
+        button_frame.pack(fill="x", pady=(0, 5))
+
+        # 添加选择文件按钮
+        tk.Button(button_frame, text="选择文件", command=lambda idx=index: self.multi_select_file(idx),
+                  bg=BUTTON_COLOR, fg="white", font=('Microsoft YaHei', 10), padx=10, pady=5).pack(side="left",
+                                                                                                   padx=(0, 5))
+
+        # 添加复制IP按钮
+        tk.Button(button_frame, text="复制IP", command=lambda idx=index: self.copy_ips_from_file(idx),
+                  bg="#2196F3", fg="white", font=('Microsoft YaHei', 10), padx=10, pady=5).pack(side="left", padx=5)
+
+        # 添加清空输入按钮
+        tk.Button(button_frame, text="清空输入", command=lambda idx=index: self.clear_panel_input(idx),
+                  bg="#FF9800", fg="white", font=('Microsoft YaHei', 10), padx=10, pady=5).pack(side="left", padx=5)
+
+        # 添加合并导出按钮
+        tk.Button(button_frame, text="合并导出", command=self.multi_merge_files,
+                  bg="#9C27B0", fg="white", font=('Microsoft YaHei', 10), padx=10, pady=5).pack(side="left", padx=5)
+
+        file_label = tk.Label(frame, text="未选择文件", fg=T_TEXT_COLOR, bg=FRAME_COLOR, font=('Microsoft YaHei', 9))
+        file_label.pack()
+
+        input_frame = ttk.Frame(frame, style='TFrame')
+        input_frame.pack(fill="x", pady=10)
+
+        tk.Label(input_frame, text="指令源:", font=('Microsoft YaHei', 9), fg=T_TEXT_COLOR, bg=FRAME_COLOR).grid(row=0,
+                                                                                                                 column=0,
+                                                                                                                 sticky="w")
+        source_var = tk.StringVar(value="集团")
+        tk.Radiobutton(input_frame, text="集团", variable=source_var, value="集团", bg=FRAME_COLOR,
+                       font=('Microsoft YaHei', 9)).grid(row=1, column=0, sticky="w", padx=5)
+        tk.Radiobutton(input_frame, text="SOC", variable=source_var, value="SOC", bg=FRAME_COLOR,
+                       font=('Microsoft YaHei', 9)).grid(row=1, column=1, sticky="w", padx=5)
+
+        tk.Label(input_frame, text="指令号:", font=('Microsoft YaHei', 9), fg=T_TEXT_COLOR, bg=FRAME_COLOR).grid(row=2,
+                                                                                                                 column=0,
+                                                                                                                 sticky="w",
+                                                                                                                 pady=(
+                                                                                                                     10,
+                                                                                                                     5))
+        order_num = tk.Entry(input_frame, width=25, font=('Microsoft YaHei', 9), relief=tk.FLAT, highlightthickness=1,
+                             highlightbackground="#ccc")
+        order_num.grid(row=3, column=0, columnspan=2, sticky="w")
+
+        tk.Label(input_frame, text="类型:", font=('Microsoft YaHei', 9), fg=T_TEXT_COLOR, bg=FRAME_COLOR).grid(row=4,
+                                                                                                               column=0,
+                                                                                                               sticky="w",
+                                                                                                               pady=(
+                                                                                                                   10,
+                                                                                                                   5))
+        type_var = tk.StringVar(value="封禁")
+        tk.Radiobutton(input_frame, text="封禁", variable=type_var, value="封禁", bg=FRAME_COLOR,
+                       font=('Microsoft YaHei', 9)).grid(row=5, column=0, sticky="w", padx=5)
+        tk.Radiobutton(input_frame, text="解封", variable=type_var, value="解封", bg=FRAME_COLOR,
+                       font=('Microsoft YaHei', 9)).grid(row=5, column=1, sticky="w", padx=5)
+
+        tk.Label(input_frame, text="下发时间:", font=('Microsoft YaHei', 9), fg=T_TEXT_COLOR, bg=FRAME_COLOR).grid(
+            row=6, column=0, sticky="w", pady=(10, 5))
+        issue_time = tk.Entry(input_frame, width=25, font=('Microsoft YaHei', 9), relief=tk.FLAT, highlightthickness=1,
+                              highlightbackground="#ccc")
+        issue_time.insert(0, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        issue_time.grid(row=7, column=0, columnspan=2, sticky="w")
+
+        return {
+            'frame': frame,
+            'file_label': file_label,
+            'source_var': source_var,
+            'order_num': order_num,
+            'type_var': type_var,
+            'issue_time': issue_time,
+            'file_path': None
+        }
+
+    def clear_panel_input(self, index):
+        """清空指定面板的输入内容"""
+        panel = self.multi_panels[index]
+        # 重置文件信息
+        panel['file_path'] = None
+        panel['file_label'].config(text="未选择文件", fg=T_TEXT_COLOR)
+
+        # 重置指令号
+        panel['order_num'].delete(0, tk.END)
+
+        # 重置下发时间为当前时间
+        panel['issue_time'].delete(0, tk.END)
+        panel['issue_time'].insert(0, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        # 指令源和类型保持默认值不变
+        # panel['source_var'].set("集团")
+        # panel['type_var'].set("封禁")
+
+    def copy_ips_from_file(self, index):
+        """从文件中提取A列内容并复制到剪贴板（不包括标题行）"""
+        panel = self.multi_panels[index]
+        if not panel['file_path']:
+            messagebox.showwarning("提示", "请先选择文件")
+            return
+
+        try:
+            content_lines = ExcelReader.read_column_a(panel['file_path'])
+            if not content_lines:
+                messagebox.showinfo("提示", "文件中未找到A列内容")
+                return
+
+            content = "\n".join(content_lines)
+
+            # 复制到剪贴板
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()  # 确保剪贴板更新
+
+            # 显示成功消息
+            messagebox.showinfo("成功", f"已复制{len(content_lines)}条A列内容到剪贴板")
+
+        except Exception as e:
+            messagebox.showerror("错误", f"读取文件时出错: {str(e)}")
+
+    def multi_select_file(self, index):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Excel Files", "*.xlsx"), ("Text Files", "*.txt"), ("CSV Files", "*.csv")])
+        if file_path:
+            self.multi_panels[index]['file_path'] = file_path
+            filename = os.path.basename(file_path)
+            filename_without_ext = os.path.splitext(filename)[0]
+            self.multi_panels[index]['file_label'].config(text=filename, fg=T_TEXT_COLOR)
+            self.multi_panels[index]['order_num'].delete(0, tk.END)
+            self.multi_panels[index]['order_num'].insert(0, filename_without_ext)
+
+    def multi_merge_files(self):
+        all_data = []
+        all_content_lines = []  # 存储所有A列内容用于汇总标签页
+
+        # 获取全局值班人员信息
+        global_staff = self.global_staff_entry.get().strip()
+        if not global_staff:
+            messagebox.showerror("错误", "请输入值班人员信息")
+            return
+
+        for panel in self.multi_panels:
+            if not panel['file_path']:
+                continue
+
+            try:
+                # 读取A列内容（除去标题行）
+                content_lines = ExcelReader.read_column_a(panel['file_path'])
+                if not content_lines:
+                    messagebox.showwarning("提示", f"文件 {os.path.basename(panel['file_path'])} 中未找到A列内容")
+                    continue
+
+                if not panel['order_num'].get():
+                    messagebox.showerror("错误",
+                                         f"请填写文件 {os.path.basename(panel['file_path'])} 的指令号")
+                    return
+
+                # 存储数据用于导出
+                all_data.append({
+                    'ips': content_lines,  # 使用A列内容作为IP/网段字段
+                    'source': panel['source_var'].get(),
+                    'order_num': panel['order_num'].get(),
+                    'ip_type': panel['type_var'].get(),
+                    'issue_time': panel['issue_time'].get(),
+                    'staff': global_staff  # 使用全局值班人员信息
+                })
+
+                # 添加到汇总列表
+                all_content_lines.extend(content_lines)
+
+            except Exception as e:
+                messagebox.showerror("错误", f"处理文件 {os.path.basename(panel['file_path'])} 时出错: {str(e)}")
+                return
+
+        if not all_data:
+            messagebox.showwarning("提示", "没有有效数据可导出")
+            return
+
+        # 导出为CSV文件
+        save_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")])
+        if not save_path:
+            return
+
+        try:
+            with open(save_path, 'w', encoding='utf-8-sig') as f:
+                f.write("指令源,指令号,类型,IP/网段,下发时间,当天值班人员\n")
+                for data in all_data:
+                    for ip in data['ips']:
+                        f.write(
+                            f"{data['source']},{data['order_num']},{data['ip_type']},{ip},{data['issue_time']},{data['staff']}\n")
+            messagebox.showinfo("成功", f"文件已合并保存到: {save_path}")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存文件时出错: {str(e)}")
+
+    def init_merge_tab(self):
+        """初始化文件合并标签页"""
+        frame = self.merge_tab
+        tk.Label(frame, text="文件合并", font=('Microsoft YaHei', 12, 'bold'), bg=FRAME_COLOR, fg=T_TEXT_COLOR).pack(
+            pady=(10, 20))
+
+        # 文件选择区域
+        file_frame = ttk.LabelFrame(frame, text="选择文件", padding=10)
+        file_frame.pack(fill="x", padx=10, pady=5)
+
+        # 文件列表区域
+        list_frame = tk.Frame(file_frame, bg=FRAME_COLOR)
+        list_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        self.file_listbox = tk.Listbox(
+            list_frame,
+            yscrollcommand=scrollbar.set,
+            height=6,
+            bg="white",
+            fg="#333",
+            selectbackground="#4CAF50",
+            selectforeground="white",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground="#ccc"
+        )
+        self.file_listbox.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        scrollbar.config(command=self.file_listbox.yview)
+
+        # 按钮区域
+        btn_frame = tk.Frame(file_frame, bg=FRAME_COLOR)
+        btn_frame.pack(fill="x", padx=5, pady=(0, 5))
+
+        tk.Button(btn_frame, text="添加文件", command=self.merge_add_files,
+                  bg=BUTTON_COLOR, fg="white", font=('Microsoft YaHei', 9), padx=8, pady=3).pack(side="left", padx=5)
+
+        tk.Button(btn_frame, text="移除选中", command=self.merge_remove_file,
+                  bg="#f44336", fg="white", font=('Microsoft YaHei', 9), padx=8, pady=3).pack(side="left", padx=5)
+
+        tk.Button(btn_frame, text="清空列表", command=self.merge_clear_files,
+                  bg="#607D8B", fg="white", font=('Microsoft YaHei', 9), padx=8, pady=3).pack(side="left", padx=5)
+
+        # 合并按钮
+        btn_merge_frame = tk.Frame(frame, bg=FRAME_COLOR)
+        btn_merge_frame.pack(pady=10)
+        tk.Button(btn_merge_frame, text="合并文件", command=self.merge_files,
+                  bg=BUTTON_COLOR, fg="white", font=('Microsoft YaHei', 10), padx=15, pady=5).pack()
+
+    def merge_add_files(self):
+        """添加文件到合并列表"""
+        files = filedialog.askopenfilenames(
+            filetypes=[("Excel Files", "*.xlsx"), ("CSV Files", "*.csv"), ("Text Files", "*.txt")])
+        if files:
+            for file_path in files:
+                if file_path not in self.file_listbox.get(0, tk.END):
+                    self.file_listbox.insert(tk.END, file_path)
+
+    def merge_remove_file(self):
+        """从列表中移除选中的文件"""
+        selection = self.file_listbox.curselection()
+        if selection:
+            self.file_listbox.delete(selection)
+
+    def merge_clear_files(self):
+        """清空文件列表"""
+        self.file_listbox.delete(0, tk.END)
+
+    def merge_files(self):
+        """合并多个文件"""
+        files = self.file_listbox.get(0, tk.END)
+        if not files:
+            messagebox.showerror("错误", "请选择至少一个文件")
+            return
+
+        all_content_lines = []  # 存储所有提取的A列内容
+
+        # 处理每个文件
+        for file_path in files:
+            try:
+                filename = os.path.basename(file_path)
+                # 读取A列内容
+                content_lines = ExcelReader.read_column_a(file_path)
+                all_content_lines.extend(content_lines)
+
+                if not content_lines:
+                    messagebox.showwarning("提示", f"文件 {filename} 中未找到A列内容")
+
+            except Exception as e:
+                messagebox.showerror("错误", f"处理文件 {filename} 时出错: {str(e)}")
+                return
+
+        if not all_content_lines:
+            messagebox.showwarning("提示", "所有文件中均未找到A列内容")
+            return
+
+        # 保存合并后的CSV
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv")],
+            initialfile=f"合并结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        if not save_path:
+            return
+
+        try:
+            current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(save_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                # 写入表头
+                writer.writerow(["指令源", "指令号", "类型", "IP/网段", "下发时间", "当天值班人员"])
+                for content in all_content_lines:
+                    # 写入每行数据
+                    writer.writerow(["集团", "合并文件", "封禁", content, current_time_str, ""])
+
+            messagebox.showinfo("成功", f"成功合并 {len(files)} 个文件\n已保存到: {save_path}")
+
+        except Exception as e:
+            messagebox.showerror("错误", f"保存文件时出错: {str(e)}")
+
+    def init_whitelist_tab(self):
+        frame = self.whitelist_tab
+        tk.Label(frame, text="白名单过滤", font=('Microsoft YaHei', 12, 'bold'), bg=FRAME_COLOR, fg=T_TEXT_COLOR).pack(
+            pady=(10, 20))
+
+        # 创建主框架
+        self.main_frame = ttk.Frame(frame)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 创建三个带标签的框架
+        self.input_frame = ttk.LabelFrame(self.main_frame, text="需要过滤的IP地址", padding=10)
+        self.whitelist_frame = ttk.LabelFrame(self.main_frame, text="白名单IP地址", padding=10)
+        self.output_frame = ttk.LabelFrame(self.main_frame, text="非白名单IP地址", padding=10)
+
+        # 使用grid布局
+        self.input_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        self.whitelist_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        self.output_frame.grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
+
+        # 配置网格行列权重
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.main_frame.grid_columnconfigure(1, weight=1)
+        self.main_frame.grid_columnconfigure(2, weight=1)
+        self.main_frame.grid_rowconfigure(0, weight=1)
+
+        # 创建按钮框架
+        self.button_frame = ttk.Frame(self.main_frame)
+        self.button_frame.grid(row=1, column=0, columnspan=3, pady=10, sticky="ew")
+
+        # 创建按钮
+        style = ttk.Style()
+        style.configure('Accent.TButton', foreground='white', background='#0078d7')
+        style.map('Accent.TButton', background=[('active', '#005499')])
+
+        self.filter_button = ttk.Button(self.button_frame, text="执行过滤", command=self.filter_ips,
+                                        style='Accent.TButton')
+        self.filter_button.pack(side=tk.LEFT, padx=5)
+
+        self.clear_input_button = ttk.Button(self.button_frame, text="清空输入", command=self.clear_input)
+        self.clear_input_button.pack(side=tk.LEFT, padx=5)
+
+        self.clear_output_button = ttk.Button(self.button_frame, text="清空输出", command=self.clear_output)
+        self.clear_output_button.pack(side=tk.LEFT, padx=5)
+
+        self.save_whitelist_button = ttk.Button(self.button_frame, text="保存白名单", command=self.save_whitelist)
+        self.save_whitelist_button.pack(side=tk.LEFT, padx=5)
+
+        # 创建文本框和滚动条
+        self.input_text = self.create_text_widget(self.input_frame)
+        self.whitelist_text = self.create_text_widget(self.whitelist_frame)
+        self.output_text = self.create_text_widget(self.output_frame, state='disabled')
+
+        # 添加标签和计数器
+        self.create_counters()
+
+        # 设置字体
+        text_font = font.Font(family='Consolas', size=10)
+        self.input_text.configure(font=text_font)
+        self.whitelist_text.configure(font=text_font)
+        self.output_text.configure(font=text_font)
+
+        # 配置高亮标签
+        self.whitelist_text.tag_config('highlight', background='yellow', foreground='black')
+
+        # 文件路径配置
+        self.whitelist_path = os.path.abspath(r".\告警白名单.txt")
+        self.load_whitelist()
+        self.setup_bindings()
+
+    def create_counters(self):
+        """创建计数器标签"""
+        self.input_counter = ttk.Label(self.input_frame, text="IP数量: 0")
+        self.input_counter.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 5))
+
+        self.whitelist_counter = ttk.Label(self.whitelist_frame, text="白名单条目: 0")
+        self.whitelist_counter.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 5))
+
+        self.output_counter = ttk.Label(self.output_frame, text="非白名单IP: 0")
+        self.output_counter.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 5))
+
+    def create_text_widget(self, parent, state='normal'):
+        """创建带滚动条的文本框"""
+        text_widget = scrolledtext.ScrolledText(
+            parent,
+            wrap=tk.NONE,
+            state=state,
+            undo=True,
+            height=20,
+            padx=10,
+            pady=10,
+            relief=tk.GROOVE,
+            borderwidth=2
+        )
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        return text_widget
+
+    def setup_bindings(self):
+        """设置事件绑定"""
+        self.input_text.bind("<KeyRelease>", self.update_input_counter)
+        self.whitelist_text.bind("<KeyRelease>", self.update_whitelist_counter)
+
+    def update_input_counter(self, event=None):
+        """更新输入框IP计数器"""
+        content = self.input_text.get('1.0', tk.END)
+        ip_count = len([ip for ip in content.splitlines() if ip.strip()])
+        self.input_counter.config(text=f"IP数量: {ip_count}")
+
+    def update_whitelist_counter(self, event=None):
+        """更新白名单计数器"""
+        content = self.whitelist_text.get('1.0', tk.END)
+        entry_count = len([entry for entry in content.splitlines() if entry.strip()])
+        self.whitelist_counter.config(text=f"白名单条目: {entry_count}")
+
+    def update_output_counter(self, count):
+        """更新输出框计数器"""
+        self.output_counter.config(text=f"非白名单IP: {count}")
+
+    def load_whitelist(self):
+        """加载白名单文件"""
+        try:
+            os.makedirs(os.path.dirname(self.whitelist_path), exist_ok=True)
+            if not os.path.exists(self.whitelist_path):
+                with open(self.whitelist_path, 'w', encoding='utf-8') as f:
+                    f.write("# 白名单格式说明：\n")
+                    f.write("# 每行一个IP地址或CIDR网段\n")
+                    f.write("# 例如：\n")
+                    f.write("192.168.1.1\n")
+                    f.write("10.0.0.0/8\n")
+                    f.write("# 上面是示例，实际使用时请删除注释行\n")
+
+            with open(self.whitelist_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                self.whitelist_text.delete('1.0', tk.END)
+                self.whitelist_text.insert('1.0', content)
+                self.whitelist_text.edit_modified(False)
+                self.update_whitelist_counter()
+        except Exception as e:
+            messagebox.showerror("错误", f"加载白名单失败: {str(e)}")
+
+    def save_whitelist(self):
+        """保存白名单到文件"""
+        try:
+            content = self.whitelist_text.get('1.0', tk.END)
+            # 过滤掉空行和注释行
+            filtered_lines = [line for line in content.splitlines()
+                              if line.strip() and not line.strip().startswith('#')]
+
+            with open(self.whitelist_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(filtered_lines))
+
+            self.whitelist_text.edit_modified(False)
+            messagebox.showinfo("成功", "白名单已保存！")
+            self.load_whitelist()  # 重新加载以确保格式正确
+        except Exception as e:
+            messagebox.showerror("错误", f"保存白名单失败: {str(e)}")
+
+    def clear_input(self):
+        """清空输入框"""
+        self.input_text.delete('1.0', tk.END)
+        self.update_input_counter()
+
+    def clear_output(self):
+        """清空输出框"""
+        self.output_text.config(state='normal')
+        self.output_text.delete('1.0', tk.END)
+        self.output_text.config(state='disabled')
+        self.update_output_counter(0)
+        self.whitelist_text.tag_remove('highlight', '1.0', tk.END)
+
+    def is_ip_in_whitelist(self, ip_str, whitelist):
+        """检查IP是否匹配白名单规则"""
+        try:
+            ip = ipaddress.ip_address(ip_str.strip())
+            for entry in whitelist:
+                entry = entry.strip()
+                if not entry or entry.startswith('#'):
+                    continue
+                try:
+                    network = ipaddress.ip_network(entry, strict=False)
+                    if ip in network:
+                        return True, entry
+                except ValueError:
+                    if entry == ip_str:
+                        return True, entry
+        except ValueError:
+            return False, None
+        return False, None
+
+    def highlight_whitelist_entry(self, entry):
+        """高亮显示白名单中的匹配条目并自动定位"""
+        self.whitelist_text.tag_remove('highlight', '1.0', tk.END)
+
+        content = self.whitelist_text.get('1.0', tk.END)
+        start_idx = '1.0'
+        found_positions = []
+
+        while True:
+            start_idx = self.whitelist_text.search(
+                entry,
+                start_idx,
+                tk.END,
+                exact=True,
+                regexp=False
+            )
+            if not start_idx:
+                break
+
+            end_idx = f"{start_idx}+{len(entry)}c"
+            self.whitelist_text.tag_add('highlight', start_idx, end_idx)
+            found_positions.append(start_idx)
+            start_idx = end_idx
+
+        if found_positions:
+            self.whitelist_text.see(found_positions[0])
+            return True
+        return False
+
+    def filter_ips(self, event=None):
+        """执行过滤操作"""
+        # 清空之前的高亮
+        self.whitelist_text.tag_remove('highlight', '1.0', tk.END)
+
+        # 获取输入内容
+        input_content = self.input_text.get('1.0', tk.END)
+        input_ips = [ip.strip() for ip in input_content.splitlines() if ip.strip()]
+
+        if not input_ips:
+            messagebox.showwarning("提示", "请输入要过滤的IP地址！")
+            return
+
+        # 获取白名单条目（过滤掉空行和注释）
+        whitelist_content = self.whitelist_text.get('1.0', tk.END)
+        whitelist_entries = [e.strip() for e in whitelist_content.splitlines()
+                             if e.strip() and not e.strip().startswith('#')]
+
+        if not whitelist_entries:
+            messagebox.showwarning("提示", "白名单为空，请添加白名单条目！")
+            return
+
+        # 过滤非白名单IP
+        non_whitelist = []
+        matched_entries = set()
+        has_match = False
+
+        for ip in input_ips:
+            is_match, matched_entry = self.is_ip_in_whitelist(ip, whitelist_entries)
+            if not is_match:
+                non_whitelist.append(ip)
+            elif matched_entry:
+                matched_entries.add(matched_entry)
+                # 高亮显示匹配项
+                if self.highlight_whitelist_entry(matched_entry):
+                    has_match = True
+
+        # 更新输出框
+        self.output_text.config(state='normal')
+        self.output_text.delete('1.0', tk.END)
+        self.output_text.insert('1.0', '\n'.join(non_whitelist))
+        self.output_text.config(state='disabled')
+        self.update_output_counter(len(non_whitelist))
+
+        # 显示结果消息
+        if matched_entries:
+            if len(matched_entries) > 3:
+                match_msg = f"找到 {len(matched_entries)} 个匹配的白名单条目"
+            else:
+                match_msg = f"匹配的白名单条目: {', '.join(matched_entries)}"
+
+            messagebox.showinfo(
+                "过滤完成",
+                f"{match_msg}\n非白名单IP数量: {len(non_whitelist)}"
+            )
+        else:
+            messagebox.showinfo(
+                "过滤完成",
+                f"所有输入的IP都不在白名单中\n非白名单IP数量: {len(non_whitelist)}"
+            )
+
+    def init_blacklist_tab(self):
+        """初始化IP黑名单转换工具标签页"""
+        frame = self.blacklist_tab
+        tk.Label(frame, text="IP黑名单转换工具", font=('Microsoft YaHei', 12, 'bold'), bg=FRAME_COLOR,
+                 fg=T_TEXT_COLOR).pack(
+            pady=(10, 20))
+
+        # 文件路径配置
+        self.blacklist_path = os.path.abspath(r".\最新黑名单.csv")
+
+        # 输入框架
+        self.blacklist_input_frame = ttk.LabelFrame(frame, text="输入IP地址（每行一个）", padding=10)
+        self.blacklist_input_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # 输入文本框
+        self.blacklist_input_text = scrolledtext.ScrolledText(self.blacklist_input_frame, height=10)
+        self.blacklist_input_text.pack(fill=tk.BOTH, expand=True)
+
+        # 按钮框架
+        self.blacklist_button_frame = ttk.Frame(frame)
+        self.blacklist_button_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # 操作按钮
+        style = ttk.Style()
+        style.configure('Accent.TButton', foreground='white', background='#0078d7')
+        style.map('Accent.TButton', background=[('active', '#005499')])
+
+        self.blacklist_process_button = ttk.Button(
+            self.blacklist_button_frame,
+            text="处理IP",
+            command=self.blacklist_process_ips,
+            style='Accent.TButton'
+        )
+        self.blacklist_process_button.pack(side=tk.LEFT, padx=5)
+
+        self.blacklist_save_button = ttk.Button(
+            self.blacklist_button_frame,
+            text="保存CSV",
+            command=self.blacklist_save_to_csv
+        )
+        self.blacklist_save_button.pack(side=tk.LEFT, padx=5)
+
+        # 输出框架
+        self.blacklist_output_frame = ttk.LabelFrame(frame, text="处理结果", padding=10)
+        self.blacklist_output_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # 输出文本框
+        self.blacklist_output_text = scrolledtext.ScrolledText(self.blacklist_output_frame, height=15)
+        self.blacklist_output_text.pack(fill=tk.BOTH, expand=True)
+
+        # 设置字体
+        text_font = font.Font(family='Consolas', size=10)
+        self.blacklist_input_text.configure(font=text_font)
+        self.blacklist_output_text.configure(font=text_font)
+
+    def blacklist_is_valid_ip(self, ip_str):
+        """验证IP地址并返回带子网掩码的格式"""
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            if ip.version == 4:
+                return f"{ip_str}/32"
+            elif ip.version == 6:
+                return f"{ip_str}/128"
+        except ValueError:
+            return None
+
+    def blacklist_process_ips(self):
+        """处理IP地址"""
+        ips = [ip.strip() for ip in self.blacklist_input_text.get("1.0", tk.END).splitlines() if ip.strip()]
+        if not ips:
+            messagebox.showwarning("警告", "请输入至少一个IP地址")
+            return
+
+        results = []
+        for ip in ips:
+            ip_with_mask = self.blacklist_is_valid_ip(ip)
+            if ip_with_mask:
+                results.append(f"{ip_with_mask},源地址,永久,{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                results.append(f"# 无效IP: {ip}")
+
+        self.blacklist_output_text.delete("1.0", tk.END)
+        self.blacklist_output_text.insert(tk.END, "\n".join(results))
+        self.valid_results = [r for r in results if not r.startswith("#")]
+
+    def blacklist_save_to_csv(self):
+        """保存到CSV文件"""
+        if not hasattr(self, 'valid_results'):
+            messagebox.showwarning("警告", "请先处理IP地址")
+            return
+
+        try:
+            # 检查/创建文件
+            file_exists = os.path.exists(self.blacklist_path)
+            with open(self.blacklist_path, 'a', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+
+                # 新文件才写入表头
+                if not file_exists or os.stat(self.blacklist_path).st_size == 0:
+                    writer.writerow(["IP地址", "类型", "过期时长", "备注"])
+
+                # 写入有效数据
+                for result in self.valid_results:
+                    writer.writerow(result.split(','))
+
+            # 结果验证
+            if os.path.exists(self.blacklist_path):
+                messagebox.showinfo("成功",
+                                    f"已保存{len(self.valid_results)}条记录\n"
+                                    f"文件位置：{self.blacklist_path}")
+            else:
+                messagebox.showerror("错误", "文件保存失败！")
+
+        except PermissionError:
+            messagebox.showerror("错误", "文件被占用！请关闭Excel/WPS等程序")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存失败：{str(e)}")
+
+    def init_unblock_tab(self):
+        """初始化解封IP过滤标签页"""
+        frame = self.unblock_tab
+        tk.Label(frame, text="解封IP过滤", font=('Microsoft YaHei', 12, 'bold'), bg=FRAME_COLOR, fg=T_TEXT_COLOR).pack(
+            pady=(10, 20))
+
+        # 创建主框架
+        main_frame = ttk.Frame(frame)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 创建三个带标签的框架
+        banned_frame = ttk.LabelFrame(main_frame, text="封禁IP列表 (每行一个IP)", padding=10)
+        unblock_frame = ttk.LabelFrame(main_frame, text="解封IP列表 (每行一个IP)", padding=10)
+        result_frame = ttk.LabelFrame(main_frame, text="过滤后的封禁IP列表", padding=10)
+
+        # 使用grid布局
+        banned_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        unblock_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        result_frame.grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
+
+        # 配置网格行列权重
+        main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(2, weight=1)
+        main_frame.grid_rowconfigure(0, weight=1)
+
+        # 创建文本框
+        self.banned_text = scrolledtext.ScrolledText(banned_frame, height=20, wrap=tk.NONE, font=('Consolas', 10))
+        self.banned_text.pack(fill=tk.BOTH, expand=True)
+
+        self.unblock_text = scrolledtext.ScrolledText(unblock_frame, height=20, wrap=tk.NONE, font=('Consolas', 10))
+        self.unblock_text.pack(fill=tk.BOTH, expand=True)
+
+        self.result_text = scrolledtext.ScrolledText(result_frame, height=20, wrap=tk.NONE, font=('Consolas', 10),
+                                                     state='disabled')
+        self.result_text.pack(fill=tk.BOTH, expand=True)
+
+        # 配置标签用于高亮显示
+        self.unblock_text.tag_configure("red", foreground="red")
+
+        # 创建按钮框架
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=1, column=0, columnspan=3, pady=10, sticky="ew")
+
+        # 创建过滤按钮
+        filter_btn = ttk.Button(button_frame, text="执行过滤", command=self.filter_unblock_ips,
+                                style='Accent.TButton')
+        filter_btn.pack(side=tk.LEFT, padx=5)
+
+        # 清空按钮
+        clear_btn = ttk.Button(button_frame, text="清空所有", command=self.clear_unblock_inputs)
+        clear_btn.pack(side=tk.LEFT, padx=5)
+
+    def clear_unblock_inputs(self):
+        """清空解封IP过滤标签页的所有输入"""
+        self.banned_text.delete('1.0', tk.END)
+        self.unblock_text.delete('1.0', tk.END)
+        self.result_text.config(state='normal')
+        self.result_text.delete('1.0', tk.END)
+        self.result_text.config(state='disabled')
+
+    def filter_unblock_ips(self):
+        """执行解封IP过滤"""
+        # 获取封禁IP列表
+        banned_ips = [ip.strip() for ip in self.banned_text.get('1.0', tk.END).splitlines() if ip.strip()]
+        if not banned_ips:
+            messagebox.showwarning("警告", "请输入封禁IP列表")
+            return
+
+        # 获取解封IP列表
+        unblock_ips = [ip.strip() for ip in self.unblock_text.get('1.0', tk.END).splitlines() if ip.strip()]
+        if not unblock_ips:
+            messagebox.showwarning("警告", "请输入解封IP列表")
+            return
+
+        # 清空之前的高亮
+        self.unblock_text.tag_remove("red", "1.0", "end")
+
+        # 过滤出仍然需要封禁的IP
+        remaining_banned = []
+        matched_ips = []
+
+        # 遍历所有解封IP
+        for unblock_ip in unblock_ips:
+            # 在解封文本框中查找并高亮匹配项
+            start_index = "1.0"
+            while True:
+                pos = self.unblock_text.search(unblock_ip, start_index, stopindex=tk.END)
+                if not pos:
+                    break
+                end_pos = f"{pos}+{len(unblock_ip)}c"
+                self.unblock_text.tag_add("red", pos, end_pos)
+                start_index = end_pos
+
+        # 过滤封禁IP列表
+        for ip in banned_ips:
+            if ip not in unblock_ips:
+                remaining_banned.append(ip)
+            else:
+                matched_ips.append(ip)
+
+        # 更新结果文本框
+        self.result_text.config(state='normal')
+        self.result_text.delete('1.0', tk.END)
+        self.result_text.insert('1.0', '\n'.join(remaining_banned))
+        self.result_text.config(state='disabled')
+
+        # 显示结果消息
+        messagebox.showinfo(
+            "过滤完成",
+            f"已过滤掉 {len(matched_ips)} 个解封IP\n"
+            f"剩余封禁IP数量: {len(remaining_banned)}"
+        )
+
+
+# ==================== 目录扫描模块 ====================
+class AsyncDirScannerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("目录扫描器 - 异步优化版 (2025)")
+        self.root.geometry("960x720")
+        self.root.resizable(True, True)
+
+        self.wordlist = []
+        self.is_running = False
+        self.task_cancel = False
+        self.result_queue = queue.Queue()
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        main_frame = ttk.Frame(self.root, padding=12)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = ttk.LabelFrame(main_frame, text="扫描设置", padding=10)
+        input_frame.pack(fill=tk.X, pady=(0, 12))
+
+        ttk.Label(input_frame, text="目标网址：").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.url_entry = ttk.Entry(input_frame, width=65)
+        self.url_entry.grid(row=0, column=1, sticky=tk.EW, padx=6)
+        self.url_entry.insert(0, "https://example.com")
+
+        ttk.Label(input_frame, text="字典文件：").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.dict_path_var = tk.StringVar()
+        dict_entry = ttk.Entry(input_frame, textvariable=self.dict_path_var, width=55)
+        dict_entry.grid(row=1, column=1, sticky=tk.EW, padx=6)
+        ttk.Button(input_frame, text="选择字典", command=self.browse_dict).grid(row=1, column=2, padx=4)
+
+        ttk.Label(input_frame, text="并发数：").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.concurrency_var = tk.StringVar(value="50")
+        ttk.Spinbox(input_frame, from_=10, to=300, textvariable=self.concurrency_var, width=8).grid(row=2, column=1,
+                                                                                                    sticky=tk.W, padx=6)
+
+        ttk.Label(input_frame, text="超时(秒)：").grid(row=2, column=1, sticky=tk.W, padx=(220, 6))
+        self.timeout_var = tk.StringVar(value="6")
+        ttk.Spinbox(input_frame, from_=3, to=20, textvariable=self.timeout_var, width=8).grid(row=2, column=1,
+                                                                                              sticky=tk.W,
+                                                                                              padx=(300, 0))
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=10)
+
+        self.start_btn = ttk.Button(btn_frame, text="开始扫描", command=self.start_scan)
+        self.start_btn.pack(side=tk.LEFT, padx=6)
+
+        self.stop_btn = ttk.Button(btn_frame, text="停止扫描", command=self.stop_scan, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=6)
+
+        ttk.Button(btn_frame, text="清空结果", command=self.clear_result).pack(side=tk.LEFT, padx=6)
+
+        progress_frame = ttk.Frame(main_frame)
+        progress_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.progress = ttk.Progressbar(progress_frame, mode='determinate')
+        self.progress.pack(fill=tk.X)
+
+        self.status_var = tk.StringVar(value="就绪")
+        ttk.Label(main_frame, textvariable=self.status_var, font=("Segoe UI", 9)).pack(anchor=tk.W)
+
+        result_frame = ttk.LabelFrame(main_frame, text="扫描结果（包含404等所有响应）", padding=10)
+        result_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.NONE, font=("Consolas", 10))
+        self.result_text.pack(fill=tk.BOTH, expand=True)
+
+        self.result_text.tag_config("200", foreground="#2ecc71")
+        self.result_text.tag_config("30x", foreground="#f1c40f")
+        self.result_text.tag_config("403", foreground="#e67e22")
+        self.result_text.tag_config("404", foreground="#95a5a6")
+        self.result_text.tag_config("50x", foreground="#e74c3c")
+        self.result_text.tag_config("info", foreground="#3498db", font=("Consolas", 10, "bold"))
+        self.result_text.tag_config("error", foreground="red")
+
+    def browse_dict(self):
+        path = filedialog.askopenfilename(
+            title="选择字典文件 (txt)",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if path:
+            self.dict_path_var.set(path)
+
+    def load_wordlist(self):
+        path = self.dict_path_var.get().strip()
+        if not os.path.isfile(path):
+            messagebox.showerror("错误", "请选择有效的字典文件")
+            return False
+
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                self.wordlist = [line.strip() for line in f if line.strip() and not line.startswith(('#', '/'))]
+            self.wordlist = [p.lstrip('/') for p in self.wordlist if p.strip('/')]
+            if not self.wordlist:
+                messagebox.showerror("错误", "字典文件内容为空")
+                return False
+            self.log(f"info", f"字典加载完成：{len(self.wordlist):,} 条有效路径")
+            return True
+        except Exception as e:
+            messagebox.showerror("读取失败", str(e))
+            return False
+
+    def log(self, tag, msg):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {msg}"
+        self.result_queue.put((tag, line))
+
+    def start_scan(self):
+        if self.is_running:
+            return
+
+        target = self.url_entry.get().strip()
+        if not target:
+            messagebox.showwarning("提示", "请输入目标网址")
+            return
+
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+            self.url_entry.delete(0, tk.END)
+            self.url_entry.insert(0, target)
+
+        if not self.load_wordlist():
+            return
+
+        try:
+            concurrency = int(self.concurrency_var.get())
+            timeout = float(self.timeout_var.get())
+        except:
+            messagebox.showwarning("提示", "并发数 / 超时请输入有效数字")
+            return
+
+        self.is_running = True
+        self.task_cancel = False
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.status_var.set("正在初始化异步扫描...")
+        self.progress['value'] = 0
+        self.progress['maximum'] = len(self.wordlist)
+
+        self.result_text.delete(1.0, tk.END)
+        self.log("info", f"目标 → {target}")
+        self.log("info", f"并发 → {concurrency} | 超时 → {timeout}s | 总路径 → {len(self.wordlist):,}\n")
+
+        threading.Thread(
+            target=lambda: asyncio.run(self.async_scan_worker(target, concurrency, timeout)),
+            daemon=True
+        ).start()
+
+        self.root.after(400, self.process_queue)
+
+    def stop_scan(self):
+        if self.is_running:
+            self.task_cancel = True
+            self.status_var.set("正在停止... 请稍候")
+            self.log("info", "收到停止指令，正在取消任务...")
+
+    async def async_scan_worker(self, base_url, concurrency, timeout):
+        connector = aiohttp.TCPConnector(limit=concurrency + 20, force_close=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = []
+            total = len(self.wordlist)
+            done_count = 0
+
+            for path in self.wordlist:
+                if self.task_cancel:
+                    break
+                tasks.append(self.scan_one(session, base_url, path, timeout))
+
+                if len(tasks) >= concurrency * 2:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for r in results:
+                        if not self.task_cancel:
+                            self.handle_result(r, done_count, total)
+                            done_count += 1
+                    tasks = []
+
+            if tasks and not self.task_cancel:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    self.handle_result(r, done_count, total)
+                    done_count += 1
+
+        self.result_queue.put(("info", "\n" + "=" * 70))
+        if self.task_cancel:
+            self.result_queue.put(("info", "扫描被用户手动终止"))
+        else:
+            self.result_queue.put(("info", f"扫描完成！总共处理 {done_count:,} / {total:,} 条路径"))
+        self.result_queue.put(("done", None))
+
+    async def scan_one(self, session, base_url, path, timeout):
+        url = urljoin(base_url.rstrip("/") + "/", path)
+        try:
+            start = time.time()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=False) as resp:
+                status = resp.status
+                size = 0
+                try:
+                    content = await resp.read()
+                    size = len(content)
+                except:
+                    pass
+                elapsed = time.time() - start
+                return (status, url, size, elapsed, path)
+        except Exception as e:
+            return ("error", url, 0, 0, path, str(e)[:60])
+
+    def handle_result(self, result, done, total):
+        if isinstance(result, Exception):
+            return
+
+        if result[0] == "error":
+            tag = "error"
+            line = f"[ERR ] {result[1]} → {result[5]}"
+        else:
+            status, url, size, elapsed, path = result
+            tag = str(status) if str(status).startswith("20") else \
+                "30x" if 300 <= status < 400 else \
+                    str(status) if status == 403 else \
+                        "404" if status == 404 else \
+                            "50x" if 500 <= status < 600 else "other"
+
+            line = f"[{status:4d}] {url:<75} {size:>8,} b   {elapsed:>5.2f}s"
+
+        self.result_queue.put((tag, line))
+        self.result_queue.put(("progress", done + 1))
+
+    def process_queue(self):
+        try:
+            while True:
+                item = self.result_queue.get_nowait()
+                tag, value = item
+
+                if tag == "progress":
+                    self.progress['value'] = value
+                    self.status_var.set(
+                        f"扫描中... {value:,} / {len(self.wordlist):,} ({value / len(self.wordlist) * 100:.1f}%)")
+                elif tag == "done":
+                    self.is_running = False
+                    self.start_btn.config(state=tk.NORMAL)
+                    self.stop_btn.config(state=tk.DISABLED)
+                    self.status_var.set("扫描结束" if not self.task_cancel else "已停止")
+                    self.progress.stop()
+                    break
+                else:
+                    self.result_text.insert(tk.END, value + "\n", tag)
+                    self.result_text.see(tk.END)
+        except queue.Empty:
+            pass
+
+        if self.is_running:
+            self.root.after(250, self.process_queue)
+
+    def clear_result(self):
+        if not self.is_running:
+            self.result_text.delete(1.0, tk.END)
+            self.progress['value'] = 0
+            self.status_var.set("就绪")
+
+
+# ==================== 端口扫描模块 ====================
+COMMON_PORTS = [80, 443, 8080, 8443, 8000, 8888, 9000, 9001, 9200, 6379, 3306, 22, 21, 3389, 1433, 1521, 5432]
+
+RCE_RELATED_PORTS = [
+    80, 443, 8080, 8443, 7001, 7002, 4848, 8181, 9080, 9443,
+    1099, 4444, 5555, 12345, 12346,
+    5985, 5986, 445, 139, 2375, 2376
+]
+
+TOP100_PORTS = [
+    80, 443, 21, 22, 23, 25, 53, 110, 111, 135, 139, 143, 389, 445,
+    465, 993, 995, 1723, 3306, 3389, 5432, 5900, 6379, 8080, 8443,
+    9200, 11211, 27017, 5000, 8000, 8008, 8081, 8089, 8888, 9000,
+    9001, 9042, 9090, 9200
+]
+
+TOP1000_PORTS = TOP100_PORTS + [
+    81, 88, 161, 389, 512, 513, 514, 623, 1099, 1433, 1521, 2049,
+    2121, 2375, 3128, 4444, 5555, 5901, 5985, 6082, 7001, 8009,
+    8088, 8161, 8333, 8649, 9002, 9100, 9999, 10000
+]
+
+ALL_PORTS = list(range(1, 65536))
+
+
+class WebPortScannerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Web端口探测工具 - 支持并发")
+        self.root.geometry("900x680")
+        self.running = False
+        self.queue = queue.Queue()
+        self.create_widgets()
+
+    def create_widgets(self):
+        frame = ttk.Frame(self.root, padding="12")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="目标域名 / IP:").grid(row=0, column=0, sticky="e", pady=6, padx=5)
+        self.target_var = tk.StringVar(value="www.example.com")
+        ttk.Entry(frame, textvariable=self.target_var, width=45).grid(row=0, column=1, sticky="ew", pady=6)
+
+        ttk.Label(frame, text="端口范围:").grid(row=1, column=0, sticky="e", pady=6, padx=5)
+        self.port_mode = tk.StringVar(value="top100")
+        port_frame = ttk.Frame(frame)
+        port_frame.grid(row=1, column=1, sticky="w", pady=6)
+
+        ttk.Radiobutton(port_frame, text="TOP 100", variable=self.port_mode, value="top100").pack(side="left", padx=6)
+        ttk.Radiobutton(port_frame, text="TOP 1000", variable=self.port_mode, value="top1000").pack(side="left", padx=6)
+        ttk.Radiobutton(port_frame, text="精简Web", variable=self.port_mode, value="common").pack(side="left", padx=6)
+        ttk.Radiobutton(port_frame, text="RCE相关", variable=self.port_mode, value="rce").pack(side="left", padx=6)
+        ttk.Radiobutton(port_frame, text="全端口", variable=self.port_mode, value="all").pack(side="left", padx=6)
+
+        ttk.Label(frame, text="自定义端口:").grid(row=2, column=0, sticky="e", pady=6, padx=5)
+        self.custom_ports_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self.custom_ports_var, width=45).grid(row=2, column=1, sticky="ew", pady=6)
+        ttk.Label(frame, text="(逗号分隔)").grid(row=2, column=2, sticky="w", padx=5)
+
+        ttk.Label(frame, text="连接超时(秒):").grid(row=3, column=0, sticky="e", pady=6, padx=5)
+        self.timeout_var = tk.DoubleVar(value=1.2)
+        ttk.Spinbox(frame, from_=0.3, to=6.0, increment=0.1, textvariable=self.timeout_var, width=8).grid(row=3,
+                                                                                                          column=1,
+                                                                                                          sticky="w",
+                                                                                                          pady=6)
+
+        ttk.Label(frame, text="并发线程数:").grid(row=4, column=0, sticky="e", pady=6, padx=5)
+        self.threads_var = tk.IntVar(value=80)
+        ttk.Spinbox(frame, from_=10, to=1000, increment=10, textvariable=self.threads_var, width=8).grid(row=4,
+                                                                                                         column=1,
+                                                                                                         sticky="w",
+                                                                                                         pady=6)
+        ttk.Label(frame, text="(建议: TOP100→50, TOP1000→150, 全端口→300~800)").grid(row=4, column=2, sticky="w",
+                                                                                     padx=8)
+
+        self.btn_start = ttk.Button(frame, text="开始扫描", command=self.toggle_scan, width=15)
+        self.btn_start.grid(row=5, column=0, columnspan=2, pady=12)
+
+        self.result_text = scrolledtext.ScrolledText(frame, width=100, height=28, font=("Consolas", 10))
+        self.result_text.grid(row=6, column=0, columnspan=3, pady=5, sticky="nsew")
+
+        self.status_var = tk.StringVar(value="就绪")
+        ttk.Label(frame, textvariable=self.status_var).grid(row=7, column=0, columnspan=3, sticky="w", pady=3)
+
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(6, weight=1)
+
+    def log(self, msg):
+        self.queue.put(msg + "\n")
+
+    def update_ui(self):
+        while not self.queue.empty():
+            line = self.queue.get_nowait()
+            self.result_text.insert(tk.END, line)
+            self.result_text.see(tk.END)
+        if self.running:
+            self.root.after(80, self.update_ui)
+
+    def toggle_scan(self):
+        if self.running:
+            self.running = False
+            self.btn_start.config(text="开始扫描")
+            self.status_var.set("正在停止...")
+            return
+
+        target = self.target_var.get().strip()
+        if not target:
+            messagebox.showwarning("提示", "请输入目标域名或IP")
+            return
+
+        if target.startswith(("http://", "https://")):
+            target = urlparse(target).netloc or target.split("://", 1)[1].split("/", 1)[0]
+
+        custom_str = self.custom_ports_var.get().strip()
+        mode = self.port_mode.get()
+
+        if custom_str:
+            try:
+                ports = [int(p.strip()) for p in custom_str.split(",") if p.strip().isdigit()]
+                if not ports:
+                    raise ValueError
+            except:
+                messagebox.showwarning("提示", "自定义端口格式错误")
+                return
+        else:
+            if mode == "top100":
+                ports = TOP100_PORTS
+            elif mode == "top1000":
+                ports = TOP1000_PORTS
+            elif mode == "common":
+                ports = COMMON_PORTS
+            elif mode == "rce":
+                ports = RCE_RELATED_PORTS
+            elif mode == "all":
+                if not messagebox.askyesno("警告", "全端口扫描非常耗时且可能被拦截，确定继续？"):
+                    return
+                ports = ALL_PORTS
+            else:
+                ports = COMMON_PORTS
+
+        timeout = self.timeout_var.get()
+        max_workers = self.threads_var.get()
+
+        if max_workers < 10:
+            max_workers = 10
+        if max_workers > 1500:
+            max_workers = 1500
+
+        self.result_text.delete("1.0", tk.END)
+        self.running = True
+        self.btn_start.config(text="停止扫描")
+        self.status_var.set(f"正在扫描 {target} ... 并发: {max_workers}")
+
+        threading.Thread(
+            target=self.scan_with_threadpool,
+            args=(target, ports, timeout, max_workers),
+            daemon=True
+        ).start()
+
+        self.root.after(100, self.update_ui)
+
+    def scan_port(self, target, port, timeout):
+        if not self.running:
+            return None
+
+        is_open = False
+        banner = ""
+        protocol = "TCP"
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((target, port))
+
+            if result == 0:
+                is_open = True
+
+                try:
+                    sock.settimeout(0.8)
+                    data = sock.recv(1024).decode(errors='ignore').strip()
+                    if data:
+                        banner = data.splitlines()[0][:70]
+                except:
+                    pass
+
+                if port in (80, 8080, 8000, 8888, 9000):
+                    protocol = "HTTP"
+                elif port in (443, 8443):
+                    protocol = "HTTPS"
+                elif port == 22:
+                    protocol = "SSH"
+                elif port == 21:
+                    protocol = "FTP"
+                elif port == 3306:
+                    protocol = "MySQL"
+                elif port == 6379:
+                    protocol = "Redis"
+                elif port == 27017:
+                    protocol = "MongoDB"
+
+            sock.close()
+
+        except:
+            pass
+
+        if is_open:
+            banner_show = banner if banner else "无banner"
+            return f"{port:6}  open    {protocol:<8}  {banner_show}"
+        return None
+
+    def scan_with_threadpool(self, target, ports, timeout, max_workers):
+        total = len(ports)
+        found = 0
+        self.log(f"目标: {target}")
+        self.log(f"端口总数: {total:,}")
+        self.log(f"并发线程: {max_workers}")
+        self.log(f"超时: {timeout}s\n")
+
+        results = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_port = {
+                executor.submit(self.scan_port, target, port, timeout): port
+                for port in ports
+            }
+
+            for future in concurrent.futures.as_completed(future_to_port):
+                if not self.running:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    self.log("\n扫描被用户终止")
+                    break
+
+                port = future_to_port[future]
+                try:
+                    result = future.result()
+                    if result:
+                        found += 1
+                        self.log(result)
+                except:
+                    pass
+
+                self.status_var.set(f"已完成 {len(future_to_port) - len(future_to_port)} / {total}  开放: {found}")
+
+        if self.running:
+            self.log(f"\n扫描完成！发现 {found} 个开放端口")
+            self.running = False
+            self.btn_start.config(text="开始扫描")
+            self.status_var.set(f"完成 - 开放端口: {found}")
+
+
+# ==================== 编码转换模块 ====================
+class EncodeConverterGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("多功能转换工具")
+        self.root.geometry("1100x780")
+        self.root.minsize(1000, 700)
+
+        self.aes_key = None
+        self.rsa_key_pair = None
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        main_frame = ttk.Frame(self.root, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = ttk.Label(
+            main_frame,
+            text="多功能编码 / 哈希 / 加密 / 格式化工具",
+            font=("Helvetica", 16, "bold")
+        )
+        title_label.pack(pady=(0, 15))
+
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.create_encode_tab()
+        self.create_base_tab()
+        self.create_hash_tab()
+        self.create_crypto_tab()
+        self.create_format_tab()
+
+    def create_encode_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="编码 / 解码")
+
+        container = ttk.Frame(tab, padding=20)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        input_lbl = ttk.Label(container, text="输入文本：")
+        input_lbl.pack(anchor="w", pady=(0, 5))
+
+        self.enc_in = scrolledtext.ScrolledText(container, height=6, font=("Consolas", 10), wrap=tk.WORD)
+        self.enc_in.pack(fill=tk.BOTH, expand=True, pady=6)
+
+        mode_frame = ttk.Frame(container)
+        mode_frame.pack(fill=tk.X, pady=10)
+
+        self.enc_mode = tk.StringVar(value="Base64")
+        modes = ["Base64", "Base32", "Hex", "URL", "HTML Escape", "Unicode Esc"]
+        for m in modes:
+            ttk.Radiobutton(mode_frame, text=m, variable=self.enc_mode, value=m).pack(side=tk.LEFT, padx=10)
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(fill=tk.X, pady=12)
+
+        ttk.Button(btn_frame, text="编码", command=self.do_encode, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="解码", command=self.do_decode, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="清空", command=lambda: self.enc_in.delete("1.0", tk.END), width=12).pack(
+            side=tk.LEFT, padx=10)
+
+        output_lbl = ttk.Label(container, text="结果：")
+        output_lbl.pack(anchor="w", pady=(10, 5))
+
+        self.enc_out = scrolledtext.ScrolledText(container, height=10, font=("Consolas", 10))
+        self.enc_out.pack(fill=tk.BOTH, expand=True)
+
+    def do_encode(self):
+        text = self.enc_in.get("1.0", tk.END).strip()
+        mode = self.enc_mode.get()
+        try:
+            if mode == "Base64":
+                res = base64.b64encode(text.encode()).decode()
+            elif mode == "Base32":
+                res = base64.b32encode(text.encode()).decode()
+            elif mode == "Hex":
+                res = binascii.hexlify(text.encode()).decode()
+            elif mode == "URL":
+                res = quote(text)
+            elif mode == "HTML Escape":
+                res = html.escape(text)
+            elif mode == "Unicode Esc":
+                res = text.encode("unicode_escape").decode()
+            else:
+                res = "未知模式"
+            self.enc_out.delete("1.0", tk.END)
+            self.enc_out.insert(tk.END, res)
+        except Exception as e:
+            messagebox.showerror("编码错误", str(e))
+
+    def do_decode(self):
+        text = self.enc_in.get("1.0", tk.END).strip()
+        mode = self.enc_mode.get()
+        try:
+            if mode == "Base64":
+                text += "=" * (-len(text) % 4)
+                res = base64.b64decode(text).decode(errors="replace")
+            elif mode == "Base32":
+                text += "=" * (-len(text) % 8)
+                res = base64.b32decode(text).decode(errors="replace")
+            elif mode == "Hex":
+                res = binascii.unhexlify(text).decode(errors="replace")
+            elif mode == "URL":
+                res = unquote(text)
+            elif mode == "HTML Escape":
+                res = html.unescape(text)
+            elif mode == "Unicode Esc":
+                res = bytes(text, "utf-8").decode("unicode_escape")
+            else:
+                res = "未知模式"
+            self.enc_out.delete("1.0", tk.END)
+            self.enc_out.insert(tk.END, res)
+        except Exception as e:
+            messagebox.showerror("解码错误", str(e))
+
+    def create_base_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="进制转换")
+
+        container = ttk.Frame(tab, padding=30)
+        container.pack(expand=True)
+
+        input_frame = ttk.Frame(container)
+        input_frame.pack(pady=15)
+
+        ttk.Label(input_frame, text="输入数字：", width=12).pack(side=tk.LEFT, padx=5)
+        self.base_in = ttk.Entry(input_frame, width=35)
+        self.base_in.pack(side=tk.LEFT, padx=5)
+
+        base_frame = ttk.Frame(container)
+        base_frame.pack(pady=10)
+
+        ttk.Label(base_frame, text="来自进制：", width=12).pack(side=tk.LEFT, padx=5)
+        self.from_base = tk.StringVar(value="10")
+        ttk.Combobox(base_frame, textvariable=self.from_base, values=["2", "8", "10", "16"], width=8,
+                     state="readonly").pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(base_frame, text="转到进制：", width=12).pack(side=tk.LEFT, padx=20)
+        self.to_base = tk.StringVar(value="16")
+        ttk.Combobox(base_frame, textvariable=self.to_base, values=["2", "8", "10", "16"], width=8,
+                     state="readonly").pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(container, text="开始转换", command=self.do_base_convert, width=15).pack(pady=20)
+
+        self.base_out = scrolledtext.ScrolledText(container, height=8, width=60, font=("Consolas", 11))
+        self.base_out.pack(pady=10)
+
+    def do_base_convert(self):
+        try:
+            num_str = self.base_in.get().strip()
+            from_b = int(self.from_base.get())
+            to_b = int(self.to_base.get())
+            decimal = int(num_str, from_b)
+
+            if to_b == 10:
+                res = str(decimal)
+            else:
+                res = ""
+                n = decimal
+                while n > 0:
+                    res = "0123456789ABCDEF"[n % to_b] + res
+                    n //= to_b
+                res = res or "0"
+
+            result_text = f"输入: {num_str} (进制 {from_b})\n输出: {res} (进制 {to_b})\n十进制中间值: {decimal}"
+            self.base_out.delete("1.0", tk.END)
+            self.base_out.insert(tk.END, result_text)
+        except Exception as e:
+            messagebox.showerror("进制转换错误", f"{e}\n请检查输入是否符合源进制格式")
+
+    def create_hash_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="单向哈希")
+
+        container = ttk.Frame(tab, padding=30)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text="输入文本：").pack(anchor="w", pady=(0, 8))
+
+        self.hash_in = scrolledtext.ScrolledText(container, height=5, font=("Consolas", 10))
+        self.hash_in.pack(fill=tk.BOTH, expand=True, pady=8)
+
+        hash_frame = ttk.Frame(container)
+        hash_frame.pack(fill=tk.X, pady=12)
+
+        self.hash_type = tk.StringVar(value="MD5")
+        for h in ["MD5", "SHA1", "SHA256", "SHA512"]:
+            ttk.Radiobutton(hash_frame, text=h, variable=self.hash_type, value=h).pack(side=tk.LEFT, padx=20)
+
+        ttk.Button(container, text="计算哈希值", command=self.do_hash, width=15).pack(pady=15)
+
+        self.hash_out = scrolledtext.ScrolledText(container, height=6, font=("Consolas", 11))
+        self.hash_out.pack(fill=tk.BOTH, expand=True)
+
+    def do_hash(self):
+        text = self.hash_in.get("1.0", tk.END).strip().encode()
+        h = self.hash_type.get()
+        try:
+            if h == "MD5":
+                res = hashlib.md5(text).hexdigest()
+            elif h == "SHA1":
+                res = hashlib.sha1(text).hexdigest()
+            elif h == "SHA256":
+                res = hashlib.sha256(text).hexdigest()
+            elif h == "SHA512":
+                res = hashlib.sha512(text).hexdigest()
+            self.hash_out.delete("1.0", tk.END)
+            self.hash_out.insert(tk.END, f"{h.upper()}:\n{res}\n\n(大写形式)\n{res.upper()}")
+        except Exception as e:
+            messagebox.showerror("哈希错误", str(e))
+
+    def create_crypto_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="AES / RSA 加解密")
+
+        main_container = ttk.Frame(tab)
+        main_container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(main_container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scrollbar.pack(side="right", fill="y")
+
+        def _on_mousewheel(event):
+            if event.num == 4 or event.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5 or event.delta < 0:
+                canvas.yview_scroll(1, "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel)
+        canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        container = ttk.Frame(scrollable_frame, padding=20)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        aes_lbl = ttk.Label(container, text="AES 加解密", font=("Helvetica", 12, "bold"))
+        aes_lbl.pack(anchor="w", pady=(0, 10))
+
+        ttk.Label(container, text="输入（明文/密文 Base64）:").pack(anchor="w")
+        self.aes_in = scrolledtext.ScrolledText(container, height=5, font=("Consolas", 10))
+        self.aes_in.pack(fill=tk.X, pady=5)
+
+        key_frame = ttk.Frame(container)
+        key_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Label(key_frame, text="密钥 (Base64): ").pack(side=tk.LEFT)
+        self.aes_key_entry = ttk.Entry(key_frame, width=55)
+        self.aes_key_entry.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        ttk.Button(key_frame, text="生成 256位密钥", command=self.gen_aes_key).pack(side=tk.LEFT, padx=5)
+
+        aes_btns = ttk.Frame(container)
+        aes_btns.pack(fill=tk.X, pady=12)
+
+        ttk.Button(aes_btns, text="AES 加密", command=self.aes_encrypt, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(aes_btns, text="AES 解密", command=self.aes_decrypt, width=12).pack(side=tk.LEFT, padx=10)
+
+        self.aes_out = scrolledtext.ScrolledText(container, height=7, font=("Consolas", 10))
+        self.aes_out.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        ttk.Separator(container, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=25)
+
+        rsa_lbl = ttk.Label(container, text="RSA 加解密", font=("Helvetica", 12, "bold"))
+        rsa_lbl.pack(anchor="w", pady=(0, 10))
+
+        ttk.Label(container, text="输入（明文/密文 Base64）:").pack(anchor="w")
+        self.rsa_in = scrolledtext.ScrolledText(container, height=5, font=("Consolas", 10))
+        self.rsa_in.pack(fill=tk.X, pady=5)
+
+        rsa_btns = ttk.Frame(container)
+        rsa_btns.pack(fill=tk.X, pady=12)
+
+        ttk.Button(rsa_btns, text="生成2048位密钥对", command=self.gen_rsa, width=18).pack(side=tk.LEFT, padx=10)
+        ttk.Button(rsa_btns, text="公钥加密", command=self.rsa_encrypt, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(rsa_btns, text="私钥解密", command=self.rsa_decrypt, width=12).pack(side=tk.LEFT, padx=10)
+
+        self.rsa_out = scrolledtext.ScrolledText(container, height=7, font=("Consolas", 10))
+        self.rsa_out.pack(fill=tk.BOTH, expand=True, pady=10)
+
+    def gen_aes_key(self):
+        key = get_random_bytes(32)
+        self.aes_key = key
+        b64 = base64.b64encode(key).decode()
+        self.aes_key_entry.delete(0, tk.END)
+        self.aes_key_entry.insert(0, b64)
+        messagebox.showinfo("AES密钥", f"已生成 AES-256 密钥（Base64）:\n{b64}\n已自动填入")
+
+    def aes_encrypt(self):
+        if not self.aes_key:
+            messagebox.showwarning("提示", "请先生成密钥")
+            return
+        try:
+            data = self.aes_in.get("1.0", tk.END).strip().encode()
+            cipher = AES.new(self.aes_key, AES.MODE_CBC)
+            ct = cipher.encrypt(pad(data, AES.block_size))
+            result = base64.b64encode(cipher.iv + ct).decode()
+            self.aes_out.delete("1.0", tk.END)
+            self.aes_out.insert(tk.END, f"IV + 密文 (Base64):\n{result}")
+        except Exception as e:
+            messagebox.showerror("AES加密失败", str(e))
+
+    def aes_decrypt(self):
+        if not self.aes_key:
+            messagebox.showwarning("提示", "请先生成密钥")
+            return
+        try:
+            data = base64.b64decode(self.aes_in.get("1.0", tk.END).strip())
+            iv = data[:16]
+            ct = data[16:]
+            cipher = AES.new(self.aes_key, AES.MODE_CBC, iv)
+            pt = unpad(cipher.decrypt(ct), AES.block_size)
+            self.aes_out.delete("1.0", tk.END)
+            self.aes_out.insert(tk.END, pt.decode(errors="replace"))
+        except Exception as e:
+            messagebox.showerror("AES解密失败", str(e))
+
+    def gen_rsa(self):
+        key = RSA.generate(2048)
+        self.rsa_key_pair = key
+        priv = key.export_key().decode()
+        pub = key.publickey().export_key().decode()
+        msg = (
+            "已生成 2048 位 RSA 密钥对（仅本次会话有效）\n\n"
+            f"公钥（前100字符）:\n{pub[:100]}...\n\n"
+            f"私钥（前100字符）:\n{priv[:100]}..."
+        )
+        messagebox.showinfo("RSA 密钥生成", msg)
+
+    def rsa_encrypt(self):
+        if not self.rsa_key_pair:
+            messagebox.showwarning("提示", "请先生成密钥对")
+            return
+        try:
+            data = self.rsa_in.get("1.0", tk.END).strip().encode()
+            cipher = PKCS1_OAEP.new(self.rsa_key_pair.publickey())
+            ct = cipher.encrypt(data)
+            result = base64.b64encode(ct).decode()
+            self.rsa_out.delete("1.0", tk.END)
+            self.rsa_out.insert(tk.END, f"密文 (Base64):\n{result}")
+        except Exception as e:
+            messagebox.showerror("RSA加密失败", str(e))
+
+    def rsa_decrypt(self):
+        if not self.rsa_key_pair:
+            messagebox.showwarning("提示", "请先生成密钥对")
+            return
+        try:
+            data = base64.b64decode(self.rsa_in.get("1.0", tk.END).strip())
+            cipher = PKCS1_OAEP.new(self.rsa_key_pair)
+            pt = cipher.decrypt(data)
+            self.rsa_out.delete("1.0", tk.END)
+            self.rsa_out.insert(tk.END, pt.decode(errors="replace"))
+        except Exception as e:
+            messagebox.showerror("RSA解密失败", str(e))
+
+    def create_format_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="JSON / XML 格式化")
+
+        container = ttk.Frame(tab, padding=30)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text="输入 JSON 或 XML：").pack(anchor="w", pady=(0, 8))
+
+        self.format_in = scrolledtext.ScrolledText(container, height=10, font=("Consolas", 10))
+        self.format_in.pack(fill=tk.BOTH, expand=True, pady=8)
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(fill=tk.X, pady=15)
+
+        ttk.Button(btn_frame, text="美化 JSON", command=self.beautify_json, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="压缩 JSON", command=self.minify_json, width=12).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_frame, text="美化 XML", command=self.beautify_xml, width=12).pack(side=tk.LEFT, padx=10)
+
+        self.format_out = scrolledtext.ScrolledText(container, height=12, font=("Consolas", 10))
+        self.format_out.pack(fill=tk.BOTH, expand=True, pady=10)
+
+    def beautify_json(self):
+        try:
+            data = json.loads(self.format_in.get("1.0", tk.END))
+            pretty = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+            self.format_out.delete("1.0", tk.END)
+            self.format_out.insert(tk.END, pretty)
+        except Exception as e:
+            messagebox.showerror("JSON 格式错误", str(e))
+
+    def minify_json(self):
+        try:
+            data = json.loads(self.format_in.get("1.0", tk.END))
+            compact = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+            self.format_out.delete("1.0", tk.END)
+            self.format_out.insert(tk.END, compact)
+        except Exception as e:
+            messagebox.showerror("JSON 格式错误", str(e))
+
+    def beautify_xml(self):
+        try:
+            xml_str = self.format_in.get("1.0", tk.END).strip()
+            tree = ET.fromstring(xml_str)
+            ET.indent(tree, space="  ")
+            pretty = ET.tostring(tree, encoding="unicode")
+            self.format_out.delete("1.0", tk.END)
+            self.format_out.insert(tk.END, pretty)
+        except Exception as e:
+            messagebox.showerror("XML 格式错误", str(e))
+
+
+# ==================== 域名枚举模块 ====================
+common_subdomains = [
+    "www", "mail", "ftp", "test", "dev", "api", "app", "blog", "bbs", "forum",
+    "m", "wap", "web", "admin", "manage", "shop", "pay", "login", "my", "user",
+    "static", "img", "image", "assets", "cdn", "video", "file", "download",
+    "news", "oa", "erp", "crm", "vpn", "ns1", "ns2", "dns", "smtp", "pop3",
+    "autodiscover", "cpanel", "webmail", "secure", "portal", "internal"
+]
+
+
+class SubdomainScannerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("一级子域名枚举工具")
+        self.root.geometry("780x580")
+        self.root.resizable(True, True)
+
+        self.running = False
+        self.queue = queue.Queue()
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        frame = ttk.Frame(self.root, padding="10")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="目标域名:").grid(row=0, column=0, sticky="e", pady=6, padx=5)
+        self.domain_var = tk.StringVar(value="baidu.com")
+        ttk.Entry(frame, textvariable=self.domain_var, width=35).grid(row=0, column=1, sticky="w", pady=6)
+
+        ttk.Label(frame, text="要扫描的端口:").grid(row=1, column=0, sticky="e", pady=6, padx=5)
+        self.ports_var = tk.StringVar(value="80,443")
+        ttk.Entry(frame, textvariable=self.ports_var, width=35).grid(row=1, column=1, sticky="w", pady=6)
+        ttk.Label(frame, text="(用逗号分隔)").grid(row=1, column=2, sticky="w", padx=5)
+
+        ttk.Label(frame, text="DNS服务器:").grid(row=2, column=0, sticky="e", pady=6, padx=5)
+        self.dns_var = tk.StringVar(value="223.5.5.5")
+        dns_options = ["223.5.5.5", "223.6.6.6", "119.29.29.29", "8.8.8.8", "1.1.1.1", "114.114.114.114"]
+        self.dns_combo = ttk.Combobox(frame, textvariable=self.dns_var, values=dns_options, width=32, state="normal")
+        self.dns_combo.grid(row=2, column=1, sticky="w", pady=6)
+
+        self.btn_start = ttk.Button(frame, text="开始枚举", command=self.toggle_scan, width=15)
+        self.btn_start.grid(row=3, column=0, columnspan=2, pady=12)
+
+        self.result_text = scrolledtext.ScrolledText(frame, width=85, height=24, font=("Consolas", 10))
+        self.result_text.grid(row=4, column=0, columnspan=3, pady=5, sticky="nsew")
+
+        self.status_var = tk.StringVar(value="就绪")
+        ttk.Label(frame, textvariable=self.status_var).grid(row=5, column=0, columnspan=3, sticky="w", pady=3)
+
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(4, weight=1)
+
+    def log(self, msg):
+        self.queue.put(msg + "\n")
+
+    def update_ui(self):
+        while not self.queue.empty():
+            line = self.queue.get()
+            self.result_text.insert(tk.END, line)
+            self.result_text.see(tk.END)
+        self.root.after(150, self.update_ui)
+
+    def toggle_scan(self):
+        if self.running:
+            self.running = False
+            self.btn_start.config(text="开始枚举")
+            self.status_var.set("已停止")
+        else:
+            domain = self.domain_var.get().strip()
+            if not domain:
+                messagebox.showwarning("提示", "请输入目标域名")
+                return
+
+            ports_str = self.ports_var.get().strip()
+            if not ports_str:
+                ports = [80, 443]
+            else:
+                try:
+                    ports = [int(p.strip()) for p in ports_str.split(",") if p.strip().isdigit()]
+                    if not ports:
+                        ports = [80, 443]
+                except:
+                    messagebox.showwarning("提示", "端口格式错误，已使用默认80,443")
+                    ports = [80, 443]
+
+            dns_server = self.dns_var.get().strip()
+            if not dns_server:
+                dns_server = "223.5.5.5"
+
+            self.result_text.delete("1.0", tk.END)
+            self.running = True
+            self.btn_start.config(text="停止扫描")
+            self.status_var.set("扫描中...")
+
+            threading.Thread(target=self.scan_thread, args=(domain, ports, dns_server), daemon=True).start()
+            self.root.after(200, self.update_ui)
+
+    def scan_thread(self, domain, ports, dns_server):
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = [dns_server]
+
+        total = len(common_subdomains)
+        found_count = 0
+
+        self.log(f"目标域名: {domain}")
+        self.log(f"使用DNS服务器: {dns_server}")
+        self.log(f"扫描端口: {','.join(map(str, ports))}")
+        self.log(f"字典数量: {total} 个\n")
+
+        for i, sub in enumerate(common_subdomains, 1):
+            if not self.running:
+                self.log("\n扫描已手动停止")
+                break
+
+            full_domain = f"{sub}.{domain}"
+            self.status_var.set(f"({i}/{total}) 正在解析 {full_domain}")
+
+            try:
+                answers = resolver.resolve(full_domain, "A")
+                ip = answers[0].address
+
+                open_ports = []
+                for port in ports:
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(1.2)
+                        result = sock.connect_ex((ip, port))
+                        sock.close()
+                        if result == 0:
+                            open_ports.append(port)
+                    except:
+                        pass
+
+                port_str = ",".join(map(str, open_ports)) if open_ports else "无开放端口"
+                line = f"{full_domain:28} → {ip:15} 开放端口: {port_str}"
+                self.log(line)
+
+                if open_ports:
+                    found_count += 1
+
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout):
+                pass
+            except Exception as e:
+                self.log(f"{full_domain} 异常: {str(e)}")
+
+            time.sleep(0.02)
+
+        if self.running:
+            self.log(f"\n扫描完成！发现 {found_count} 个解析成功的子域名")
+            self.running = False
+            self.btn_start.config(text="开始枚举")
+            self.status_var.set("扫描完成")
+
+
+# ==================== 空间测绘模块 ====================
+class AssetMappingTool:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("网络空间测绘工具")
+        self.root.geometry("1200x850")
+        self.root.minsize(1100, 800)
+
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = ttk.Label(
+            main_frame,
+            text="网络空间测绘 - FOFA / Hunter / Quake / ZoomEye / Shodan / Censys / 0.zone / BinaryEdge",
+            font=("Helvetica", 14, "bold")
+        )
+        title_label.pack(pady=(0, 15))
+
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.create_config_tab()
+        self.create_query_tab()
+
+        self.apis = {}
+
+    def create_config_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="API 配置")
+
+        container = ttk.Frame(tab, padding=25)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        engines = [
+            ("FOFA", ["Email", "Key"]),
+            ("Hunter", ["API Key"]),
+            ("Quake", ["Token"]),
+            ("ZoomEye", ["API Key"]),
+            ("Shodan", ["API Key"]),
+            ("Censys", ["API ID", "Secret"]),
+            ("0.zone", ["API Key"]),
+            ("BinaryEdge", ["API Key"])
+        ]
+
+        self.config_entries = {}
+        row = 0
+        for engine, fields in engines:
+            lbl = ttk.Label(container, text=f"{engine} 配置:", width=20)
+            lbl.grid(row=row, column=0, sticky="e", pady=8, padx=10)
+
+            entry_frame = ttk.Frame(container)
+            entry_frame.grid(row=row, column=1, sticky="w", pady=8)
+
+            self.config_entries[engine] = {}
+            for field in fields:
+                ttk.Label(entry_frame, text=f"{field}:").pack(side=tk.LEFT, padx=5)
+                entry = ttk.Entry(entry_frame, width=40 if "Key" in field else 30)
+                entry.pack(side=tk.LEFT, padx=5)
+                self.config_entries[engine][field] = entry
+
+            row += 1
+
+        ttk.Button(container, text="保存配置", command=self.save_config, width=15).grid(row=row, column=0, columnspan=2,
+                                                                                        pady=20)
+
+    def save_config(self):
+        self.apis = {}
+        for engine, entries in self.config_entries.items():
+            config = {k.lower().replace(" ", "_"): v.get().strip() for k, v in entries.items()}
+            if all(config.values()):
+                self.apis[engine] = config
+        messagebox.showinfo("配置", f"已保存 {len(self.apis)} 个引擎的配置")
+
+    def create_query_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="资产查询")
+
+        container = ttk.Frame(tab, padding=25)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = ttk.Frame(container)
+        input_frame.pack(fill=tk.X, pady=15)
+
+        ttk.Label(input_frame, text="IP:", width=10).pack(side=tk.LEFT, padx=10)
+        self.ip_entry = ttk.Entry(input_frame, width=25)
+        self.ip_entry.pack(side=tk.LEFT, padx=10)
+
+        ttk.Label(input_frame, text="Domain:", width=10).pack(side=tk.LEFT, padx=10)
+        self.domain_entry = ttk.Entry(input_frame, width=25)
+        self.domain_entry.pack(side=tk.LEFT, padx=10)
+
+        ttk.Label(input_frame, text="Port:", width=10).pack(side=tk.LEFT, padx=10)
+        self.port_entry = ttk.Entry(input_frame, width=15)
+        self.port_entry.pack(side=tk.LEFT, padx=10)
+
+        btn = ttk.Button(input_frame, text="开始查询", command=self.perform_query, width=15)
+        btn.pack(side=tk.LEFT, padx=20)
+
+        self.result_text = scrolledtext.ScrolledText(container, height=25, font=("Consolas", 10))
+        self.result_text.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        self.status_var = tk.StringVar(value="就绪")
+        status_lbl = ttk.Label(container, textvariable=self.status_var)
+        status_lbl.pack(anchor="w", pady=5)
+
+    def perform_query(self):
+        ip = self.ip_entry.get().strip()
+        domain = self.domain_entry.get().strip()
+        port = self.port_entry.get().strip()
+
+        if not any([ip, domain, port]):
+            messagebox.showwarning("输入", "请至少输入一个查询参数")
+            return
+
+        self.result_text.delete("1.0", tk.END)
+        self.status_var.set("查询中...")
+
+        threading.Thread(target=self._query_thread, args=(ip, domain, port), daemon=True).start()
+
+    def _query_thread(self, ip, domain, port):
+        results = {}
+        syntax = {
+            "FOFA": f'ip="{ip}"' if ip else f'domain="{domain}"' if domain else f'port="{port}"',
+            "Hunter": f'ip="{ip}"' if ip else f'domain="{domain}"' if domain else f'port="{port}"',
+            "Quake": f'ip:"{ip}"' if ip else f'domain:"{domain}"' if domain else f'port:"{port}"',
+            "ZoomEye": f'ip="{ip}"' if ip else f'hostname="{domain}"' if domain else f'port="{port}"',
+            "Shodan": f'ip:{ip}' if ip else f'hostname:"{domain}"' if domain else f'port:{port}',
+            "Censys": f'ip:{ip}' if ip else f'services.http.response.html_title:*{domain}' if domain else f'services.port:{port}',
+            "0.zone": f'ip={ip}' if ip else f'domain={domain}' if domain else f'port={port}',
+            "BinaryEdge": f'ip:{ip}' if ip else f'host:{domain}' if domain else f'port:{port}'
+        }
+
+        for engine, query in syntax.items():
+            if engine in self.apis:
+                try:
+                    result = self.query_engine(engine, query)
+                    results[engine] = result
+                except Exception as e:
+                    results[engine] = f"错误: {str(e)}"
+
+        self.root.after(0, lambda: self.display_results(results))
+
+    def query_engine(self, engine, query):
+        config = self.apis[engine]
+        if engine == "FOFA":
+            q_b64 = base64.b64encode(query.encode()).decode()
+            url = f"https://fofa.info/api/v1/search/all?email={config['email']}&key={config['key']}&qbase64={q_b64}"
+            resp = requests.get(url).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "Hunter":
+            q_b64 = base64.b64encode(query.encode()).decode()
+            url = f"https://hunter.qianxin.com/openapi/search?api-key={config['api_key']}&search={q_b64}"
+            resp = requests.get(url).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "Quake":
+            url = "https://quake.360.cn/api/v3/search/quake_service"
+            headers = {"X-QuakeToken": config['token']}
+            data = {"query": query, "start": 0, "size": 10}
+            resp = requests.post(url, headers=headers, json=data).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "ZoomEye":
+            url = f"https://api.zoomeye.org/host/search?query={query}"
+            headers = {"API-KEY": config['api_key']}
+            resp = requests.get(url, headers=headers).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "Shodan":
+            url = f"https://api.shodan.io/shodan/host/search?key={config['api_key']}&query={query}"
+            resp = requests.get(url).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "Censys":
+            url = "https://search.censys.io/api/v2/hosts/search"
+            auth = (config['api_id'], config['secret'])
+            data = {"q": query}
+            resp = requests.post(url, auth=auth, json=data).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "0.zone":
+            url = f"https://0.zone/api/search?key={config['api_key']}&query={query}"
+            resp = requests.get(url).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+        elif engine == "BinaryEdge":
+            url = f"https://api.binaryedge.io/v2/query/search?query={query}"
+            headers = {"X-Key": config['api_key']}
+            resp = requests.get(url, headers=headers).json()
+            return json.dumps(resp, indent=2, ensure_ascii=False)
+
+    def display_results(self, results):
+        self.result_text.delete("1.0", tk.END)
+        for engine, res in results.items():
+            self.result_text.insert(tk.END, f"--- {engine} 结果 ---\n{res}\n\n")
+        self.status_var.set("查询完成")
+
+
+# ==================== 本地工具箱模块 ====================
+CONFIG_FILE = "saved_paths.json"
+
+
+def load_saved_paths():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    converted = {}
+                    for k, v in data.items():
+                        if isinstance(v, str):
+                            converted[k] = {"dir": v, "file": None}
+                        else:
+                            converted[k] = v
+                    return converted
+                return data
+        except:
+            return {}
+    return {}
+
+
+def save_paths(paths_dict):
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(paths_dict, f, ensure_ascii=False, indent=2)
+
+
+class LocalToolboxGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("路径管理 & 快速打开CMD / 运行文件")
+        self.root.geometry("880x580")
+        self.root.resizable(True, True)
+
+        self.paths = load_saved_paths()
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        main_frame = ttk.Frame(self.root, padding="15 10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="已保存的路径 / 文件（双击打开CMD或运行文件）",
+                  font=("Microsoft YaHei", 12, "bold")).pack(pady=(0, 10))
+
+        self.listbox = tk.Listbox(main_frame, font=("Consolas", 11), height=14, selectmode=tk.SINGLE,
+                                  activestyle="dotbox")
+        self.listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        self.listbox.bind("<Double-Button-1>", self.open_selected)
+        self.listbox.bind("<Delete>", self.delete_selected)
+        self.listbox.bind("<Return>", self.open_selected)
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=12)
+
+        self.start_btn = ttk.Button(btn_frame, text="添加路径/文件", command=self.add_path_or_file, width=16)
+        self.start_btn.pack(side=tk.LEFT, padx=8)
+
+        ttk.Button(btn_frame, text="删除选中", command=self.delete_selected, width=14).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_frame, text="刷新列表", command=self.refresh_list, width=14).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_frame, text="退出", command=self.root.quit, width=14).pack(side=tk.RIGHT, padx=8)
+
+        self.refresh_list()
+
+    def refresh_list(self):
+        self.listbox.delete(0, tk.END)
+        for name in sorted(self.paths.keys()):
+            data = self.paths[name]
+            dir_part = data.get("dir", "")
+            file_part = data.get("file")
+            display = f"{name}  →  {dir_part}"
+            if file_part:
+                display += f"  ({file_part})"
+            self.listbox.insert(tk.END, display)
+
+    def add_path_or_file(self):
+        path = filedialog.askopenfilename(
+            title="选择文件 或 仅选文件夹",
+            filetypes=[("所有文件", "*.*"), ("Python文件", "*.py"), ("文本文件", "*.txt"),
+                       ("可执行文件", "*.exe *.bat")]
+        )
+
+        if path:
+            target_dir = os.path.dirname(path)
+            target_file = os.path.basename(path)
+        else:
+            folder = filedialog.askdirectory(title="请选择文件夹")
+            if not folder:
+                return
+            target_dir = folder
+            target_file = None
+
+        preview_win = Toplevel(self.root)
+        preview_win.title(f"预览 - {target_dir}")
+        preview_win.geometry("780x580")
+        preview_win.minsize(700, 500)
+        preview_win.transient(self.root)
+        preview_win.grab_set()
+
+        ttk.Label(preview_win, text=f"目录：{target_dir}\n文件：{target_file or '（无具体文件，仅路径）'}",
+                  font=("Microsoft YaHei", 11)).pack(pady=8, padx=12, anchor="w")
+
+        tree_frame = ttk.Frame(preview_win)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        tree = ttk.Treeview(tree_frame, columns=("type", "name"), show="headings")
+        tree.heading("type", text="类型")
+        tree.heading("name", text="名称")
+        tree.column("type", width=80, anchor="center")
+        tree.column("name", width=600)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.load_directory_tree(tree, "", target_dir)
+
+        tree.bind("<<TreeviewOpen>>", lambda e: self.on_tree_expand(tree, target_dir))
+        tree.bind("<Double-1>", lambda e: self.open_file_or_folder(tree, target_dir))
+
+        btn_frame = ttk.Frame(preview_win)
+        btn_frame.pack(fill=tk.X, pady=12)
+
+        def confirm_save():
+            name = tk.simpledialog.askstring("命名", "给这个路径/文件起个名字：", parent=preview_win)
+            if not name or not name.strip():
+                messagebox.showwarning("提示", "名称不能为空")
+                return
+
+            name = name.strip()
+            if name in self.paths:
+                if not messagebox.askyesno("覆盖", f"'{name}' 已存在，是否覆盖？"):
+                    return
+
+            self.paths[name] = {"dir": target_dir, "file": target_file}
+            save_paths(self.paths)
+            self.refresh_list()
+            messagebox.showinfo("成功",
+                                f"已保存：\n{name} → {target_dir}" + (f" ({target_file})" if target_file else ""))
+            preview_win.destroy()
+
+        ttk.Button(btn_frame, text="确认保存", command=confirm_save, width=18).pack(side=tk.LEFT, padx=20)
+        ttk.Button(btn_frame, text="取消", command=preview_win.destroy, width=12).pack(side=tk.RIGHT, padx=20)
+
+    def load_directory_tree(self, tree, parent_iid, path):
+        try:
+            items = sorted(os.listdir(path))
+            for item in items:
+                full_path = os.path.join(path, item)
+                item_type = "文件夹" if os.path.isdir(full_path) else "文件"
+                iid = tree.insert(parent_iid, "end", text=item, values=(item_type, item))
+
+                if os.path.isdir(full_path):
+                    tree.insert(iid, "end", text="加载中...")
+        except Exception as e:
+            tree.insert(parent_iid, "end", values=("", f"读取失败: {str(e)}"))
+
+    def on_tree_expand(self, tree, base_path):
+        selected = tree.focus()
+        if not selected:
+            return
+
+        children = tree.get_children(selected)
+        if len(children) > 0 and tree.item(children[0])["text"] != "加载中...":
+            return
+
+        for child in children:
+            tree.delete(child)
+
+        item_name = tree.item(selected)["text"]
+        current_path = os.path.join(base_path, item_name)
+
+        if os.path.isdir(current_path):
+            self.load_directory_tree(tree, selected, current_path)
+
+    def open_file_or_folder(self, tree, base_path):
+        selected = tree.focus()
+        if not selected:
+            return
+
+        item_name = tree.item(selected)["text"]
+        full_path = os.path.join(base_path, item_name)
+
+        if os.path.isdir(full_path):
+            if not tree.item(selected, "open"):
+                tree.item(selected, open=True)
+            return
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(full_path)
+            else:
+                subprocess.Popen(['xdg-open', full_path])
+        except Exception as e:
+            messagebox.showerror("打开失败", f"无法打开：\n{full_path}\n{str(e)}")
+
+    def delete_selected(self, event=None):
+        selection = self.listbox.curselection()
+        if not selection:
+            messagebox.showwarning("提示", "请先选中要删除的项")
+            return
+
+        item = self.listbox.get(selection[0])
+        name = item.split(" → ")[0].strip()
+
+        if messagebox.askyesno("确认删除", f"确定删除 '{name}' 吗？"):
+            self.paths.pop(name, None)
+            save_paths(self.paths)
+            self.refresh_list()
+
+    def open_selected(self, event=None):
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+
+        item = self.listbox.get(selection[0])
+        name = item.split(" → ")[0].strip()
+        data = self.paths.get(name, {})
+        dir_path = data.get("dir")
+        file_name = data.get("file")
+
+        if not dir_path or not os.path.isdir(dir_path):
+            messagebox.showerror("错误", f"路径不存在：\n{dir_path}")
+            return
+
+        try:
+            if sys.platform == "win32":
+                cmd = f'start cmd /k cd /d "{dir_path}"'
+                if file_name:
+                    full_file = os.path.join(dir_path, file_name)
+                    if file_name.lower().endswith(".py"):
+                        cmd += f' && python "{full_file}"'
+                    elif file_name.lower().endswith((".exe", ".bat", ".cmd")):
+                        cmd += f' && "{full_file}"'
+                subprocess.Popen(cmd, shell=True)
+            else:
+                subprocess.Popen(['gnome-terminal', '--working-directory', dir_path, '--', 'bash'])
+        except Exception as e:
+            messagebox.showerror("打开失败", str(e))
+
+
+# ==================== 安全事件生成模块 ====================
+class SecurityEventApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("安全事件录入系统")
+        root.geometry("1200x800")
+        root.minsize(1000, 700)
+
+        # 配置根窗口网格权重
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        # 创建主框架
+        main_frame = ttk.Frame(root, padding=10)
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+
+        # 创建滚动容器
+        container = ttk.Frame(main_frame)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        # 创建Canvas和滚动条
+        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+        scrollbar_y = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollbar_x = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+
+        self.scrollable_frame = ttk.Frame(canvas)
+
+        # 配置滚动区域
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        # 保存画布项目的 ID
+        self.scrollable_frame_id = canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+
+        # 网格布局
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
+
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        # 绑定鼠标滚轮事件
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _on_shift_mousewheel(event):
+            canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # Windows 和 Mac 绑定
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
+
+        # Linux 绑定
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        # 配置Canvas大小变化
+        canvas.bind("<Configure>", lambda e: self.on_canvas_configure(e, canvas))
+
+        # 输入字段 - 使用网格布局
+        self.create_form_fields()
+
+        # 设置默认文件路径
+        self.default_template = "模板.xlsx"
+        self.template_path.set(os.path.abspath(self.default_template))
+
+        # 使用用户文档目录作为默认输出位置
+        self.default_output_folder = "./安全事件上报"
+        self.output_folder.set(self.default_output_folder)
+
+        # 绑定事件
+        self.bind_events()
+
+        # 初始化完成后更新布局
+        self.root.update_idletasks()
+        canvas.config(scrollregion=canvas.bbox("all"))
+        # 绑定主框架的点击事件
+        main_frame.bind("<Button-1>", self.clear_focus)
+        container.bind("<Button-1>", self.clear_focus)
+        canvas.bind("<Button-1>", self.clear_focus)
+        self.scrollable_frame.bind("<Button-1>", self.clear_focus)
+
+    def clear_focus(self, event):
+        """点击空白区域时清除所有输入框的焦点"""
+        # 检查点击位置是否在输入框内
+        for widget in self.root.winfo_children():
+            if widget.winfo_containing(event.x_root, event.y_root) == widget:
+                return
+
+        # 如果点击在空白区域，清除焦点
+        self.root.focus_set()
+
+    def on_canvas_configure(self, event, canvas):
+        """Canvas大小变化时调整内部框架宽度"""
+        canvas_width = event.width
+        # 使用保存的画布项目 ID
+        canvas.itemconfigure(self.scrollable_frame_id, width=canvas_width)
+
+    def create_form_fields(self):
+        """创建所有表单字段"""
+        row = 0
+
+        # 标题
+        ttk.Label(self.scrollable_frame, text="安全事件录入系统", font=("Arial", 16, "bold")).grid(
+            row=row, column=0, columnspan=8, pady=10)
+        row += 1
+
+        # 安全事件上报日期序号
+        ttk.Label(self.scrollable_frame, text="安全事件上报日期序号:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.entry_report_id = ttk.Entry(self.scrollable_frame, width=25)
+        self.entry_report_id.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+        ttk.Label(self.scrollable_frame, text="格式: MMDD-NN (例如: 0708-01)").grid(
+            row=row, column=2, padx=5, pady=5, sticky='w')
+
+        # 创建主文件夹复选框
+        self.create_main_folder_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.scrollable_frame, text="创建主文件夹", variable=self.create_main_folder_var).grid(
+            row=row, column=3, padx=5, pady=5, sticky='w')
+        row += 1
+
+        # 序号
+        ttk.Label(self.scrollable_frame, text="序号:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.entry_id = ttk.Entry(self.scrollable_frame, width=25)
+        self.entry_id.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+        row += 1
+
+        # 平台
+        ttk.Label(self.scrollable_frame, text="平台:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.platform_var = tk.StringVar()
+        self.platform_cb = ttk.Combobox(self.scrollable_frame, textvariable=self.platform_var, width=22)
+        self.platform_cb.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+        self.platform_cb['values'] = ["联通云邮平台", "联通智家平台", "联通云盘平台", "联通看家子系统平台"]
+        self.platform_cb.current(0)
+
+        # 风险级别
+        ttk.Label(self.scrollable_frame, text="风险级别:").grid(
+            row=row, column=2, padx=5, pady=5, sticky='e')
+        self.risk_level_var = tk.StringVar(value="高危")
+        self.risk_level = ttk.Combobox(self.scrollable_frame, textvariable=self.risk_level_var, width=22)
+        self.risk_level.grid(row=row, column=3, padx=5, pady=5, sticky='w')
+        self.risk_level['values'] = ["高危", "中危", "低危"]
+        row += 1
+
+        # 攻击信息
+        ttk.Label(self.scrollable_frame, text="攻击IP:").grid(
+            row=row, column=0, padx=(5, 2), pady=5, sticky='e')
+        self.entry_attack_ip = ttk.Entry(self.scrollable_frame, width=18)
+        self.entry_attack_ip.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+
+        ttk.Label(self.scrollable_frame, text="攻击端口:").grid(
+            row=row, column=2, padx=(5, 2), pady=5, sticky='e')
+        self.entry_attack_port = ttk.Entry(self.scrollable_frame, width=8)
+        self.entry_attack_port.grid(row=row, column=3, padx=5, pady=5, sticky='w')
+        self.entry_attack_port.insert(0, "0")
+
+        ttk.Label(self.scrollable_frame, text="归属地(国):").grid(
+            row=row, column=4, padx=(10, 2), pady=5, sticky='e')
+        self.entry_attack_country = ttk.Entry(self.scrollable_frame, width=12)
+        self.entry_attack_country.grid(row=row, column=5, padx=2, pady=5, sticky='w')
+        self.entry_attack_country.insert(0, "中国")
+
+        ttk.Label(self.scrollable_frame, text="(省):").grid(
+            row=row, column=6, padx=2, pady=5, sticky='e')
+        self.entry_attack_province = ttk.Entry(self.scrollable_frame, width=12)
+        self.entry_attack_province.grid(row=row, column=7, padx=(2, 10), pady=5, sticky='w')
+        row += 1
+
+        # 目的信息
+        ttk.Label(self.scrollable_frame, text="目的IP:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.entry_target_ip = ttk.Entry(self.scrollable_frame, width=18)
+        self.entry_target_ip.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+
+        ttk.Label(self.scrollable_frame, text="目的端口:").grid(
+            row=row, column=2, padx=5, pady=5, sticky='e')
+        self.entry_target_port = ttk.Entry(self.scrollable_frame, width=8)
+        self.entry_target_port.grid(row=row, column=3, padx=5, pady=5, sticky='w')
+        self.entry_target_port.insert(0, "443")
+
+        ttk.Label(self.scrollable_frame, text="归属地(国):").grid(
+            row=row, column=4, padx=(10, 2), pady=5, sticky='e')
+        self.entry_target_country = ttk.Entry(self.scrollable_frame, width=12)
+        self.entry_target_country.grid(row=row, column=5, padx=2, pady=5, sticky='w')
+        self.entry_target_country.insert(0, "中国")
+
+        ttk.Label(self.scrollable_frame, text="(省):").grid(
+            row=row, column=6, padx=2, pady=5, sticky='e')
+        self.entry_target_province = ttk.Entry(self.scrollable_frame, width=12)
+        self.entry_target_province.grid(row=row, column=7, padx=(2, 10), pady=5, sticky='w')
+        self.entry_target_province.insert(0, "北京")
+        row += 1
+
+        # 攻击类型和协议
+        ttk.Label(self.scrollable_frame, text="攻击类型:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.entry_attack_type = ttk.Entry(self.scrollable_frame, width=25)
+        self.entry_attack_type.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+
+        ttk.Label(self.scrollable_frame, text="攻击协议:").grid(
+            row=row, column=2, padx=5, pady=5, sticky='e')
+        self.protocol_var = tk.StringVar(value="https")
+        self.protocol = ttk.Combobox(self.scrollable_frame, textvariable=self.protocol_var, width=10)
+        self.protocol.grid(row=row, column=3, padx=5, pady=5, sticky='w')
+        self.protocol['values'] = ["https", "tcp", "udp"]
+        row += 1
+
+        # 告警时间和设备名称
+        ttk.Label(self.scrollable_frame, text="告警时间:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.alert_time = ttk.Entry(self.scrollable_frame, width=25)
+        self.alert_time.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+
+        ttk.Label(self.scrollable_frame, text="设备名称:").grid(
+            row=row, column=2, padx=5, pady=5, sticky='e')
+        self.device_var = tk.StringVar(value="WAF")
+        self.device = ttk.Combobox(self.scrollable_frame, textvariable=self.device_var, width=10)
+        self.device.grid(row=row, column=3, padx=5, pady=5, sticky='w')
+        self.device['values'] = ["WAF", "EDR", "IPS", "IDS"]
+        row += 1
+
+        # 自动拦截
+        ttk.Label(self.scrollable_frame, text="自动拦截:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.auto_block_var = tk.StringVar(value="是")
+        auto_block_frame = ttk.Frame(self.scrollable_frame)
+        auto_block_frame.grid(row=row, column=1, padx=5, pady=5, sticky='w')
+        ttk.Radiobutton(auto_block_frame, text="是", variable=self.auto_block_var, value="是").pack(side=tk.LEFT)
+        ttk.Radiobutton(auto_block_frame, text="否", variable=self.auto_block_var, value="否").pack(side=tk.LEFT,
+                                                                                                    padx=(10, 0))
+        row += 1
+
+        # 文件选择部分
+        ttk.Label(self.scrollable_frame, text="模板文件:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.template_path = tk.StringVar()
+        ttk.Entry(self.scrollable_frame, textvariable=self.template_path, state='readonly', width=40).grid(
+            row=row, column=1, columnspan=5, padx=5, pady=5, sticky='w')
+        ttk.Button(self.scrollable_frame, text="选择模板", command=self.select_template).grid(
+            row=row, column=6, padx=5, pady=5)
+        row += 1
+
+        ttk.Label(self.scrollable_frame, text="输出文件夹:").grid(
+            row=row, column=0, padx=5, pady=5, sticky='e')
+        self.output_folder = tk.StringVar()
+        ttk.Entry(self.scrollable_frame, textvariable=self.output_folder, state='readonly', width=40).grid(
+            row=row, column=1, columnspan=5, padx=5, pady=5, sticky='w')
+        ttk.Button(self.scrollable_frame, text="选择文件夹", command=self.select_output_folder).grid(
+            row=row, column=6, padx=5, pady=5)
+        row += 1
+
+        # 附件管理区域
+        ttk.Separator(self.scrollable_frame, orient='horizontal').grid(
+            row=row, column=0, columnspan=8, sticky='ew', pady=10)
+        row += 1
+
+        ttk.Label(self.scrollable_frame, text="附件管理:", font=("Arial", 10, "bold")).grid(
+            row=row, column=0, padx=5, pady=5, sticky='w', columnspan=8)
+        row += 1
+
+        # 创建附件管理框架
+        attachment_frame = ttk.Frame(self.scrollable_frame)
+        attachment_frame.grid(row=row, column=0, columnspan=8, sticky='nsew', padx=5, pady=5)
+        row += 1
+
+        # 配置附件管理框架网格权重
+        attachment_frame.columnconfigure(0, weight=1)
+        attachment_frame.columnconfigure(1, weight=1)
+        attachment_frame.rowconfigure(0, weight=1)
+
+        # 左侧：图片预览区域
+        image_frame = ttk.LabelFrame(attachment_frame, text="图片附件 (Ctrl+V粘贴图片)")
+        image_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        image_frame.columnconfigure(0, weight=1)
+        image_frame.rowconfigure(0, weight=1)
+        image_frame.rowconfigure(1, weight=0)
+
+        # 图片预览框架
+        self.image_preview_container = ttk.Frame(image_frame)
+        self.image_preview_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.image_preview_container.columnconfigure(0, weight=1)
+        self.image_preview_container.rowconfigure(0, weight=1)
+
+        # 创建Canvas
+        self.image_preview_canvas = tk.Canvas(self.image_preview_container, height=150)
+        self.image_preview_canvas.grid(row=0, column=0, sticky="nsew")
+
+        # 在Canvas中添加框架
+        self.image_preview_frame = ttk.Frame(self.image_preview_canvas)
+        self.image_preview_canvas.create_window((0, 0), window=self.image_preview_frame, anchor="nw")
+
+        # 添加滚动条
+        image_scrollbar = ttk.Scrollbar(self.image_preview_container, orient="vertical",
+                                        command=self.image_preview_canvas.yview)
+        image_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.image_preview_canvas.configure(yscrollcommand=image_scrollbar.set)
+
+        # 绑定框架大小变化事件
+        self.image_preview_frame.bind("<Configure>",
+                                      lambda e: self.image_preview_canvas.configure(
+                                          scrollregion=self.image_preview_canvas.bbox("all")
+                                      )
+                                      )
+
+        # 图片列表
+        self.image_list = []
+
+        # 图片操作按钮框架
+        image_button_frame = ttk.Frame(image_frame)
+        image_button_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+        image_button_frame.columnconfigure(0, weight=1)
+        image_button_frame.columnconfigure(1, weight=1)
+
+        ttk.Button(image_button_frame, text="添加图片", command=self.add_image_files).grid(row=0, column=0, padx=2,
+                                                                                           sticky="ew")
+        ttk.Button(image_button_frame, text="清空图片", command=self.clear_images).grid(row=0, column=1, padx=2,
+                                                                                        sticky="ew")
+
+        # 右侧：文件管理区域
+        file_frame = ttk.LabelFrame(attachment_frame, text="文件附件 (Ctrl+V粘贴文件)")
+        file_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        file_frame.columnconfigure(0, weight=1)
+        file_frame.rowconfigure(0, weight=1)
+        file_frame.rowconfigure(1, weight=0)
+
+        # 文件列表容器
+        file_container = ttk.Frame(file_frame)
+        file_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        file_container.columnconfigure(0, weight=1)
+        file_container.rowconfigure(0, weight=1)
+
+        # 文件列表框架
+        self.file_listbox_frame = ttk.Frame(file_container)
+        self.file_listbox_frame.grid(row=0, column=0, sticky="nsew")
+        self.file_listbox_frame.columnconfigure(0, weight=1)
+        self.file_listbox_frame.rowconfigure(0, weight=1)
+
+        # 文件列表
+        self.file_listbox = tk.Listbox(self.file_listbox_frame, height=6)
+        self.file_listbox.grid(row=0, column=0, sticky="nsew")
+
+        file_scrollbar = ttk.Scrollbar(self.file_listbox_frame, orient="vertical", command=self.file_listbox.yview)
+        file_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.file_listbox.config(yscrollcommand=file_scrollbar.set)
+
+        # 文件操作按钮框架
+        file_button_frame = ttk.Frame(file_frame)
+        file_button_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+        file_button_frame.columnconfigure(0, weight=1)
+        file_button_frame.columnconfigure(1, weight=1)
+        file_button_frame.columnconfigure(2, weight=1)
+
+        ttk.Button(file_button_frame, text="添加文件", command=self.add_files).grid(row=0, column=0, padx=2,
+                                                                                    sticky="ew")
+        ttk.Button(file_button_frame, text="移除选中", command=self.remove_selected_file).grid(row=0, column=1, padx=2,
+                                                                                               sticky="ew")
+        ttk.Button(file_button_frame, text="清空文件", command=self.clear_files).grid(row=0, column=2, padx=2,
+                                                                                      sticky="ew")
+
+        # 提交按钮
+        submit_frame = ttk.Frame(self.scrollable_frame)
+        submit_frame.grid(row=row, column=0, columnspan=8, pady=20)
+        ttk.Button(submit_frame, text="生成事件报告", command=self.submit, width=20).pack()
+        row += 1
+
+        # 状态标签
+        self.status_label = ttk.Label(self.scrollable_frame, text="准备就绪", foreground="blue")
+        self.status_label.grid(row=row, column=0, columnspan=8, pady=5)
+
+        # 底部版权信息
+        ttk.Label(self.scrollable_frame, text="© 2023 安全事件录入系统 v1.0", foreground="gray").grid(
+            row=row + 1, column=0, columnspan=8, pady=10)
+
+        # 配置网格权重
+        for i in range(8):
+            self.scrollable_frame.columnconfigure(i, weight=1)
+
+    def bind_events(self):
+        """绑定所有事件处理函数"""
+        # 绑定验证函数
+        self.entry_attack_ip.bind("<FocusOut>", self.validate_ip_and_query)
+        self.entry_target_ip.bind("<FocusOut>", self.validate_ip_and_query)
+        self.entry_attack_port.bind("<FocusOut>", self.validate_port)
+        self.entry_target_port.bind("<FocusOut>", self.validate_port)
+        self.entry_attack_country.bind("<FocusOut>", self.validate_province)
+        self.entry_target_country.bind("<FocusOut>", self.validate_province)
+
+        # 绑定Ctrl+V粘贴事件
+        self.root.bind('<Control-v>', self.handle_paste)
+
+        # 绑定文件列表删除键
+        self.root.bind('<Delete>', lambda e: self.remove_selected_file())
+
+    # ================== 图片处理功能 ==================
+    def handle_paste(self, event):
+        """处理粘贴事件"""
+        try:
+            # 尝试获取图片
+            image = self.get_clipboard_image()
+            if image:
+                self.add_image(image)
+                return
+        except Exception as e:
+            print(f"图片粘贴错误: {e}")
+
+        try:
+            # 尝试获取文件
+            files = self.get_clipboard_files()
+            if files:
+                self.add_files(files)
+        except Exception as e:
+            print(f"文件粘贴错误: {e}")
+
+    def get_clipboard_image(self):
+        """从剪贴板获取图片"""
+        try:
+            # 仅支持Windows
+            if sys.platform == 'win32':
+                import win32clipboard
+                from PIL import ImageGrab
+
+                win32clipboard.OpenClipboard()
+                if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
+                    image = ImageGrab.grabclipboard()
+                    if image:
+                        return image
+                win32clipboard.CloseClipboard()
+            else:
+                # 对于非Windows系统，尝试使用Tkinter方法
+                try:
+                    # 尝试获取PNG格式的图片
+                    image_data = self.root.clipboard_get(type='image/png')
+                    if image_data:
+                        # 解码base64图片数据
+                        if image_data.startswith('data:image/png;base64,'):
+                            image_data = image_data.split(',', 1)[1]
+                        image_bytes = base64.b64decode(image_data)
+                        return Image.open(io.BytesIO(image_bytes))
+                except:
+                    pass
+        except ImportError:
+            pass
+        return None
+
+    def add_image(self, image):
+        """添加图片到预览区域"""
+        try:
+            # 创建缩略图用于预览
+            thumbnail = image.copy()
+            thumbnail.thumbnail((60, 60), Image.LANCZOS)  # 减小缩略图尺寸
+
+            # 添加边框
+            thumbnail_with_border = ImageOps.expand(thumbnail, border=1, fill='gray')
+
+            tk_image = ImageTk.PhotoImage(thumbnail_with_border)
+
+            # 创建图片预览框
+            frame = ttk.Frame(self.image_preview_frame)
+            frame.pack(side=tk.LEFT, padx=3, pady=3, fill=tk.Y)
+
+            label = ttk.Label(frame, image=tk_image)
+            label.image = tk_image  # 保持引用
+            label.pack()
+
+            # 添加删除按钮
+            ttk.Button(frame, text="删除", width=6,
+                       command=lambda f=frame, img=image: self.remove_image(f, img)).pack()
+
+            # 保存原始图片
+            self.image_list.append({
+                "image": image,
+                "frame": frame
+            })
+
+            self.status_label.config(text="图片已添加")
+        except Exception as e:
+            self.status_label.config(text=f"图片添加失败: {str(e)}")
+
+    def add_image_files(self):
+        """通过文件对话框添加图片文件"""
+        files = filedialog.askopenfilenames(
+            title="选择图片文件",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.gif"), ("所有文件", "*.*")]
+        )
+        if not files:
+            return
+
+        for file_path in files:
+            try:
+                image = Image.open(file_path)
+                self.add_image(image)
+            except Exception as e:
+                self.status_label.config(text=f"无法加载图片: {file_path} - {str(e)}")
+
+    def remove_image(self, frame, image):
+        """移除指定图片"""
+        frame.destroy()
+
+        # 从列表中移除
+        for idx, img_info in enumerate(self.image_list):
+            if img_info["image"] == image:
+                self.image_list.pop(idx)
+                break
+
+    def clear_images(self):
+        """清空所有图片"""
+        for img_info in self.image_list[:]:
+            try:
+                img_info["frame"].destroy()
+            except:
+                pass
+
+        self.image_list = []
+        self.status_label.config(text="图片已清空")
+
+    def save_images(self, picture_folder):
+        """保存所有图片到指定文件夹"""
+        if not self.image_list:
+            return 0
+
+        if not os.path.exists(picture_folder):
+            os.makedirs(picture_folder)
+
+        for i, img_info in enumerate(self.image_list, 1):
+            img_path = os.path.join(picture_folder, f"告警_{i}.png")
+            img_info["image"].save(img_path, "PNG")
+
+        return len(self.image_list)
+
+    # ================== 文件处理功能 ==================
+    def get_clipboard_files(self):
+        """从剪贴板获取文件列表"""
+        files = []
+        try:
+            # 仅支持Windows
+            if sys.platform == 'win32':
+                import win32clipboard
+                import win32con
+
+                win32clipboard.OpenClipboard()
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+                    files = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+                win32clipboard.CloseClipboard()
+            else:
+                # 对于非Windows系统，尝试使用Tkinter方法
+                try:
+                    # 尝试获取文件路径
+                    file_path = self.root.clipboard_get()
+                    if file_path and os.path.exists(file_path):
+                        files = [file_path]
+                except:
+                    pass
+        except ImportError:
+            pass
+        return files
+
+    def add_files(self, files=None):
+        """添加文件到列表"""
+        if files is None:
+            files = filedialog.askopenfilenames(
+                title="选择文件",
+                filetypes=[("支持的文件", "*.csv *.txt *.xls *.xlsx *.zip *.png *.jpg *.jpeg *.bmp"),
+                           ("所有文件", "*.*")]
+            )
+
+        if not files:
+            return
+
+        valid_extensions = ('.csv', '.txt', '.xls', '.xlsx', '.zip', '.png', '.jpg', '.jpeg', '.bmp')
+        added = False
+
+        for file_path in files:
+            # 检查文件是否存在
+            if not os.path.exists(file_path):
+                continue
+
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in valid_extensions:
+                # 避免重复添加
+                if file_path not in self.file_listbox.get(0, tk.END):
+                    self.file_listbox.insert(tk.END, file_path)
+                    added = True
+
+        if added:
+            self.status_label.config(text="文件已添加")
+        else:
+            self.status_label.config(text="未添加文件: 不支持的文件类型或文件不存在")
+
+    def remove_selected_file(self):
+        """移除选中的文件"""
+        selected = self.file_listbox.curselection()
+        if selected:
+            self.file_listbox.delete(selected[0])
+
+    def clear_files(self):
+        """清空文件列表"""
+        self.file_listbox.delete(0, tk.END)
+
+    def save_files(self, log_folder):
+        """智能保存文件：zip文件直接复制，其他文件压缩成zip，使用第一个日志文件名作为压缩包名"""
+        if self.file_listbox.size() == 0:
+            return 0
+
+        if not os.path.exists(log_folder):
+            os.makedirs(log_folder)
+
+        zip_files = []
+        non_zip_files = []
+
+        # 分类文件
+        for i in range(self.file_listbox.size()):
+            file_path = self.file_listbox.get(i)
+            if os.path.exists(file_path):
+                if file_path.lower().endswith('.zip'):
+                    zip_files.append(file_path)
+                else:
+                    non_zip_files.append(file_path)
+
+        # 处理zip文件 - 直接复制
+        zip_count = 0
+        for file_path in zip_files:
+            try:
+                dest_path = os.path.join(log_folder, os.path.basename(file_path))
+                shutil.copy2(file_path, dest_path)
+                zip_count += 1
+            except Exception as e:
+                self.status_label.config(text=f"保存ZIP文件失败: {os.path.basename(file_path)} - {str(e)}")
+
+        # 处理非zip文件 - 压缩
+        non_zip_count = 0
+        if non_zip_files:
+            # 使用第一个日志文件的文件名（不含扩展名）作为压缩包名
+            first_file = non_zip_files[0]
+            first_file_name = os.path.splitext(os.path.basename(first_file))[0]
+            zip_path = os.path.join(log_folder, f"{first_file_name}.zip")
+
+            try:
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in non_zip_files:
+                        arcname = os.path.basename(file_path)
+                        zipf.write(file_path, arcname)
+                        non_zip_count += 1
+            except Exception as e:
+                self.status_label.config(text=f"创建压缩文件失败: {str(e)}")
+
+        return zip_count + non_zip_count
+
+    # ================== 表单验证功能 ==================
+    def validate_ip_and_query(self, event=None):
+        """验证IP格式并自动查询归属地"""
+        widget = event.widget if event else None
+        if not widget:
+            return
+
+        # 获取IP并去除空格、回车、tab
+        original_text = widget.get()
+        cleaned_text = original_text.strip().replace('\r', '').replace('\n', '').replace('\t', '')
+
+        # 如果内容有变化，更新输入框
+        if cleaned_text != original_text:
+            widget.delete(0, tk.END)
+            widget.insert(0, cleaned_text)
+
+        ip = cleaned_text
+        is_attack = (widget == self.entry_attack_ip)
+
+        # 验证IP格式
+        if self.validate_ip_target(widget):
+            # 启动查询线程
+            threading.Thread(target=self.query_ip_location, args=(is_attack, ip)).start()
+        else:
+            self.status_label.config(text=f"IP地址格式无效: {ip}")
+
+    def query_ip_location(self, is_attack=True, ip=None):
+        """查询IP归属地"""
+        try:
+            # 获取IP地址
+            if ip is None:
+                if is_attack:
+                    ip = self.entry_attack_ip.get()
+                else:
+                    ip = self.entry_target_ip.get()
+
+            # 验证IP格式
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                self.status_label.config(text=f"IP地址格式无效: {ip}")
+                return
+
+            # 更新状态
+            self.status_label.config(text=f"正在查询 {ip} 的归属地...")
+            self.root.update()
+
+            headers = {
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                "Cache-Control": "no-cache",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Origin": "https://uutool.cn",
+                "Pragma": "no-cache",
+                "Priority": "u=1, i",
+                "Referer": "https://uutool.cn/",
+                "Sec-Ch-Ua": '"Not)A;Brand";v="8", "Chromium";v="138", "Microsoft Edge";v="138"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0"
+            }
+
+            payload = {"ip": ip}
+
+            try:
+                response = requests.post(
+                    "https://api.ip77.net/ip2/v4/",
+                    data=payload,
+                    headers=headers,
+                    verify=False,
+                    impersonate="chrome110"  # 模拟 Chrome 浏览器指纹
+                )
+
+                if response.status_code == 200:
+                    # 解析JSON响应
+                    try:
+                        data = response.json()
+                        # 检查响应格式是否正确
+                        if data.get("code") == 0:
+                            location_data = data.get("data", {})
+                            country = location_data.get("country", "")
+                            province = location_data.get("province", "")
+
+                            # 如果是中国IP，自动填写省份；否则只填写国家
+                            if country == "中国" and province:
+                                self.root.after(0, self.update_location_fields, is_attack, country, province)
+                                self.status_label.config(text=f"查询成功: {ip} 归属地为 {country} {province}")
+                            else:
+                                self.root.after(0, self.update_location_fields, is_attack, country, "")
+                                self.status_label.config(text=f"查询成功: {ip} 归属地为 {country}")
+                        else:
+                            self.status_label.config(text=f"查询失败: 接口返回错误码 {data.get('code')}")
+                    except json.JSONDecodeError:
+                        self.status_label.config(text=f"解析响应失败: 非JSON格式")
+                else:
+                    self.status_label.config(text=f"查询失败: HTTP {response.status_code}")
+
+            except Exception as e:
+                self.status_label.config(text=f"查询错误: {str(e)}")
+
+        except Exception as e:
+            self.status_label.config(text=f"查询异常: {str(e)}")
+
+    def update_location_fields(self, is_attack, country, province):
+        """更新归属地字段"""
+        if is_attack:
+            self.entry_attack_country.delete(0, tk.END)
+            self.entry_attack_country.insert(0, country)
+            self.entry_attack_province.delete(0, tk.END)
+            self.entry_attack_province.insert(0, province)
+        else:
+            self.entry_target_country.delete(0, tk.END)
+            self.entry_target_country.insert(0, country)
+            self.entry_target_province.delete(0, tk.END)
+            self.entry_target_province.insert(0, province)
+
+    def select_template(self):
+        file_path = filedialog.askopenfilename(
+            title="选择模板文件",
+            filetypes=[("Excel文件", "*.xlsx"), ("所有文件", "*.*")],
+            initialfile="a.xlsx"
+        )
+        if file_path:
+            self.template_path.set(file_path)
+
+    def select_output_folder(self):
+        # 默认保存到用户文档目录
+        initial_dir = "./"
+        folder_path = filedialog.askdirectory(
+            title="选择输出文件夹",
+            initialdir=initial_dir
+        )
+        if folder_path:
+            self.output_folder.set(folder_path)
+
+    def format_alert_time(self, time_str):
+        """格式化告警时间 将日期分隔符改为/ 保留完整时间"""
+        try:
+            # 尝试解析各种常见的时间格式
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y%m%d%H%M%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+                try:
+                    dt = datetime.datetime.strptime(time_str, fmt)
+                    return dt.strftime("%Y/%m/%d %H:%M:%S")
+                except ValueError:
+                    continue
+
+            # 尝试直接替换日期分隔符
+            if len(time_str) >= 10:
+                # 替换日期部分的分隔符
+                date_part = time_str[:10].replace("-", "/")
+                # 保留时间部分
+                time_part = time_str[10:] if len(time_str) > 10 else ""
+                return date_part + time_part
+
+            return time_str
+        except Exception:
+            return time_str
+
+    def validate_ip(self, event=None):
+        """验证IP地址格式"""
+        widget = event.widget if event else None
+        ip = widget.get() if widget else ""
+
+        try:
+            ipaddress.ip_address(ip)
+            widget.config(foreground='black')
+            return True
+        except ValueError:
+            widget.config(foreground='red')
+            return False
+
+    def validate_province(self, event=None):
+        """验证省份字段 - 如果国家是中国，省份不能为空"""
+        widget = event.widget if event else None
+        if not widget:
+            return True
+
+        if widget == self.entry_attack_country:
+            country = self.entry_attack_country.get()
+            province = self.entry_attack_province.get()
+            province_widget = self.entry_attack_province
+        else:
+            country = self.entry_target_country.get()
+            province = self.entry_target_province.get()
+            province_widget = self.entry_target_province
+
+        # 如果国家是中国，省份不能为空
+        if country == "中国" and not province.strip():
+            province_widget.config(foreground='red')
+            return False
+        else:
+            province_widget.config(foreground='black')
+            return True
+
+    def validate_port(self, event=None):
+        """验证端口格式并自动去除空格、回车、tab"""
+        widget = event.widget if event else None
+        if not widget:
+            return False
+
+        # 获取输入内容并去除空格、回车、tab
+        original_text = widget.get()
+        cleaned_text = original_text.strip().replace('\r', '').replace('\n', '').replace('\t', '')
+
+        # 如果内容有变化，更新输入框
+        if cleaned_text != original_text:
+            widget.delete(0, tk.END)
+            widget.insert(0, cleaned_text)
+
+        # 验证是否为数字
+        if cleaned_text.isdigit():
+            widget.config(foreground='black')
+            return True
+        else:
+            widget.config(foreground='red')
+            return False
+
+    def validate_form(self):
+        """验证表单数据"""
+        errors = []
+
+        # 验证安全事件上报日期序号
+        if self.create_main_folder_var.get() and not self.entry_report_id.get():
+            errors.append("安全事件上报日期序号不能为空")
+
+        # 验证序号
+        if not self.entry_id.get().isdigit():
+            errors.append("序号必须是数字")
+
+        # 处理攻击IP
+        attack_ip = self.entry_attack_ip.get().strip().replace('\r', '').replace('\n', '').replace('\t', '')
+        if attack_ip != self.entry_attack_ip.get():
+            self.entry_attack_ip.delete(0, tk.END)
+            self.entry_attack_ip.insert(0, attack_ip)
+
+        if not attack_ip:
+            errors.append("攻击IP不能为空")
+        elif not self.validate_ip_target(self.entry_attack_ip):
+            errors.append("攻击IP格式无效")
+
+        # 处理目的IP
+        target_ip = self.entry_target_ip.get().strip().replace('\r', '').replace('\n', '').replace('\t', '')
+        if target_ip != self.entry_target_ip.get():
+            self.entry_target_ip.delete(0, tk.END)
+            self.entry_target_ip.insert(0, target_ip)
+
+        if not target_ip:
+            errors.append("目的IP不能为空")
+        elif not self.validate_ip_target(self.entry_target_ip):
+            errors.append("目的IP格式无效")
+
+        # 处理并验证攻击端口
+        attack_port = self.entry_attack_port.get().strip().replace('\r', '').replace('\n', '').replace('\t', '')
+        if attack_port != self.entry_attack_port.get():
+            self.entry_attack_port.delete(0, tk.END)
+            self.entry_attack_port.insert(0, attack_port)
+
+        if not attack_port:
+            errors.append("攻击端口不能为空")
+        elif not attack_port.isdigit():
+            errors.append("攻击端口必须是数字")
+
+        # 处理并验证目的端口
+        target_port = self.entry_target_port.get().strip().replace('\r', '').replace('\n', '').replace('\t', '')
+        if target_port != self.entry_target_port.get():
+            self.entry_target_port.delete(0, tk.END)
+            self.entry_target_port.insert(0, target_port)
+
+        if not target_port:
+            errors.append("目的端口不能为空")
+        elif not target_port.isdigit():
+            errors.append("目的端口必须是数字")
+
+        # 验证归属地
+        if not self.validate_province_target(self.entry_attack_country, self.entry_attack_province):
+            errors.append("攻击IP归属地: 如果国家是中国，省份不能为空")
+        if not self.validate_province_target(self.entry_target_country, self.entry_target_province):
+            errors.append("目的IP归属地: 如果国家是中国，省份不能为空")
+
+        # 验证攻击类型
+        if not self.entry_attack_type.get():
+            errors.append("攻击类型不能为空")
+
+        # 验证告警时间
+        if not self.alert_time.get():
+            errors.append("告警时间不能为空")
+
+        return errors
+
+    def validate_ip_target(self, widget):
+        """验证指定IP控件"""
+        ip = widget.get()
+        try:
+            ipaddress.ip_address(ip)
+            widget.config(foreground='black')
+            return True
+        except ValueError:
+            widget.config(foreground='red')
+            return False
+
+    def validate_province_target(self, country_widget, province_widget):
+        """验证指定归属地控件"""
+        country = country_widget.get()
+        province = province_widget.get()
+
+        # 如果国家是中国，省份不能为空
+        if country == "中国" and not province.strip():
+            province_widget.config(foreground='red')
+            return False
+        else:
+            province_widget.config(foreground='black')
+            return True
+
+    def create_folder_structure(self, report_id, seq_id):
+        """创建文件夹结构并返回新文件夹路径"""
+        try:
+            # 获取输出文件夹
+            output_base = self.output_folder.get()
+
+            # 创建主文件夹结构
+            if self.create_main_folder_var.get():
+                # 主文件夹名称
+                main_folder_name = f"家庭产品部-安全事件上报{report_id}"
+                # 完整的主文件夹路径
+                base_folder = os.path.join(output_base, main_folder_name)
+            else:
+                # 如果不创建主文件夹，直接使用输出文件夹
+                base_folder = output_base
+
+            # 创建基础文件夹
+            if not os.path.exists(base_folder):
+                os.makedirs(base_folder)
+
+            # 创建三个子文件夹
+            subfolders = [f"{seq_id}", f"{seq_id}_log", f"{seq_id}_picture"]
+            for folder in subfolders:
+                folder_path = os.path.join(base_folder, folder)
+                if not os.path.exists(folder_path):
+                    os.makedirs(folder_path)
+
+            return base_folder, os.path.join(base_folder, seq_id)  # 返回主文件夹路径和序号文件夹路径
+        except Exception as e:
+            messagebox.showerror("文件夹创建错误", f"无法创建文件夹: {str(e)}")
+            return None, None
+
+    def collect_all_events(self, base_folder):
+        """收集所有序号文件夹中的事件数据"""
+        all_events = []  # 存储所有事件数据
+
+        # 查找所有序号文件夹（纯数字命名的文件夹）
+        for folder_name in os.listdir(base_folder):
+            folder_path = os.path.join(base_folder, folder_name)
+            if os.path.isdir(folder_path) and folder_name.isdigit():
+                # 查找该文件夹中的Excel文件
+                excel_files = glob.glob(os.path.join(folder_path, "安全事件汇总.xlsx"))
+                if excel_files:
+                    excel_file = excel_files[0]
+                    try:
+                        wb = load_workbook(excel_file)
+                        sheet = wb.active
+                        # 获取第二行数据（跳过标题行）
+                        row_data = []
+                        for cell in sheet[2]:  # 第二行
+                            row_data.append(cell.value)
+                        all_events.append(row_data)
+                        wb.close()
+                    except Exception as e:
+                        print(f"读取文件 {excel_file} 出错: {str(e)}")
+
+        return all_events
+
+    def generate_master_summary(self, base_folder):
+        """生成主文件夹中的汇总文件"""
+        # 获取模板文件路径
+        template_file = self.template_path.get()
+        if not os.path.exists(template_file):
+            raise FileNotFoundError(f"模板文件不存在: {template_file}")
+
+        # 收集所有事件数据
+        all_events = self.collect_all_events(base_folder)
+        if not all_events:
+            return False
+
+        try:
+            # 加载模板文件
+            wb = load_workbook(template_file)
+            sheet = wb.active
+
+            # 清空旧数据（保留标题行）
+            if sheet.max_row > 1:
+                sheet.delete_rows(2, sheet.max_row - 1)
+
+            # 添加所有事件数据（从第二行开始）
+            for event_data in all_events:
+                sheet.append(event_data)
+
+            # 保存到主文件夹
+            output_file = os.path.join(base_folder, "安全事件汇总.xlsx")
+            wb.save(output_file)
+            wb.close()
+            return True
+        except Exception as e:
+            raise RuntimeError(f"生成汇总文件失败: {str(e)}")
+
+    def submit(self):
+        try:
+            # 验证表单
+            errors = self.validate_form()
+            if errors:
+                messagebox.showerror("输入错误", "\n".join(errors))
+                self.status_label.config(text="表单验证失败")
+                return
+
+            # 获取报告ID和序号
+            report_id = self.entry_report_id.get() if self.create_main_folder_var.get() else ""
+            seq_id = self.entry_id.get()
+
+            # 更新状态
+            self.status_label.config(text="正在创建文件夹结构...")
+            self.root.update()
+
+            # 创建文件夹结构
+            base_folder, output_folder = self.create_folder_structure(report_id, seq_id)
+            if not base_folder or not output_folder:
+                self.status_label.config(text="文件夹创建失败")
+                return
+
+            # 创建子文件夹路径
+            picture_folder = os.path.join(base_folder, f"{seq_id}_picture")
+            log_folder = os.path.join(base_folder, f"{seq_id}_log")
+
+            # 保存图片
+            if self.image_list:
+                self.status_label.config(text="正在保存图片...")
+                self.root.update()
+                image_count = self.save_images(picture_folder)
+                self.status_label.config(text=f"已保存 {image_count} 张图片到{picture_folder}")
+
+            # 智能保存文件
+            if self.file_listbox.size() > 0:
+                self.status_label.config(text="正在保存文件...")
+                self.root.update()
+                file_count = self.save_files(log_folder)
+                self.status_label.config(text=f"已保存 {file_count} 个文件到{log_folder}")
+
+            # 从GUI获取数据
+            data = {
+                "序号": int(seq_id),
+                "平台": self.platform_var.get(),
+                "攻击IP": self.entry_attack_ip.get(),
+                "攻击端口": int(self.entry_attack_port.get()),
+                "攻击IP归属地(国家)": self.entry_attack_country.get(),
+                "攻击IP归属地(省份)": self.entry_attack_province.get(),
+                "目的IP": self.entry_target_ip.get(),
+                "目的端口": int(self.entry_target_port.get()),
+                "目的IP归属地(国家)": self.entry_target_country.get(),
+                "目的IP归属地(省份)": self.entry_target_province.get(),
+                "攻击类型": self.entry_attack_type.get(),
+                "协议": self.protocol_var.get(),
+                "告警时间": self.format_alert_time(self.alert_time.get()),  # 格式化告警时间
+                "设备": self.device_var.get(),
+                "自动拦截": self.auto_block_var.get(),
+                "风险级别": self.risk_level_var.get(),
+            }
+
+            # 生成事件标题和描述
+            event_title = f"{data['平台']}受到{data['攻击IP']}{data['攻击类型']}"
+            event_desc = f"{data['平台']}受到{data['攻击IP']}{data['攻击类型']}，" \
+                         f"此次攻击无一条成功且未对平台造成影响，" \
+                         f"已在waf和防火墙处对此地址做封堵处置"
+
+            # 构建新记录
+            new_row = [
+                data["序号"],
+                event_title,
+                event_desc,
+                data["风险级别"],  # 使用选择的风险级别
+                data["攻击IP"],
+                data["攻击端口"],
+                data["攻击IP归属地(国家)"],
+                data["攻击IP归属地(省份)"],
+                data["目的IP"],
+                data["目的端口"],
+                data["目的IP归属地(国家)"],
+                data["目的IP归属地(省份)"],
+                data["攻击类型"],
+                data["协议"],
+                data["告警时间"],  # 使用格式化后的时间
+                "否",  # 重保工单
+                data["设备"],
+                data["自动拦截"],
+                data["平台"]
+            ]
+
+            # 获取文件路径
+            template_file = self.template_path.get()
+
+            # 设置输出文件路径
+            output_filename = f"安全事件汇总.xlsx"
+            output_file = os.path.join(output_folder, output_filename)
+
+            # 更新状态
+            self.status_label.config(text="正在生成报告...")
+            self.root.update()
+
+            # 检查模板文件是否存在
+            if not os.path.exists(template_file):
+                messagebox.showerror("错误", f"模板文件不存在: {template_file}")
+                self.status_label.config(text=f"错误: 模板文件不存在")
+                return
+
+            try:
+                # 打开模板文件
+                book = load_workbook(template_file)
+                sheet = book.active
+
+                # 直接修改第二行的数据
+                for col_idx, value in enumerate(new_row, 1):
+                    sheet.cell(row=2, column=col_idx, value=value)
+
+                # 保存文件
+                try:
+                    book.save(output_file)
+                except PermissionError as e:
+                    # 如果权限错误，尝试创建备份文件
+                    backup_file = "./安全事件备份.xlsx"
+                    book.save(backup_file)
+                    messagebox.showinfo("成功", f"由于权限问题，已创建备份文件: {backup_file}")
+                else:
+                    messagebox.showinfo("成功", f"安全事件已成功更新到 {os.path.basename(output_file)} 的第二行")
+
+                # 更新状态
+                self.status_label.config(text="正在生成主汇总文件...")
+                self.root.update()
+
+                # 生成主文件夹中的汇总文件
+                try:
+                    success = self.generate_master_summary(base_folder)
+                    if success:
+                        self.status_label.config(text="操作完成，主汇总文件已更新")
+                    else:
+                        self.status_label.config(text="操作完成，但未找到事件数据")
+                except Exception as e:
+                    messagebox.showerror("汇总错误", f"生成主汇总文件时出错: {str(e)}")
+                    self.status_label.config(text=f"汇总错误: {str(e)}")
+
+                # 打开生成的文件夹
+                try:
+                    if sys.platform == 'win32':
+                        os.startfile(output_folder)
+                    elif sys.platform == 'darwin':  # macOS
+                        subprocess.Popen(['open', output_folder])
+                    else:  # linux
+                        webbrowser.open(f"file://{output_folder}")
+                except:
+                    pass
+
+            except Exception as e:
+                messagebox.showerror("错误", f"文件操作失败: {str(e)}")
+                self.status_label.config(text=f"错误: {str(e)}")
+
+        except Exception as e:
+            messagebox.showerror("输入错误", f"请检查输入数据: {str(e)}")
+            self.status_label.config(text=f"错误: {str(e)}")
+
+    def clear_form(self):
+        """清空表单以便输入下一条记录"""
+        # 保留平台、设备、协议等默认值
+        current_platform = self.platform_var.get()
+        current_device = self.device_var.get()
+        current_protocol = self.protocol_var.get()
+        current_risk_level = self.risk_level_var.get()
+
+        # 清空所有输入字段
+        self.entry_report_id.delete(0, tk.END)
+        self.entry_id.delete(0, tk.END)
+        self.entry_attack_ip.delete(0, tk.END)
+        self.entry_attack_port.delete(0, tk.END)
+        self.entry_attack_port.insert(0, "0")
+        self.entry_attack_country.delete(0, tk.END)
+        self.entry_attack_country.insert(0, "中国")
+        self.entry_attack_province.delete(0, tk.END)
+        self.entry_target_ip.delete(0, tk.END)
+        self.entry_target_port.delete(0, tk.END)
+        self.entry_target_port.insert(0, "443")
+        self.entry_target_country.delete(0, tk.END)
+        self.entry_target_country.insert(0, "中国")
+        self.entry_target_province.delete(0, tk.END)
+        self.entry_attack_type.delete(0, tk.END)
+        self.alert_time.delete(0, tk.END)
+
+        # 重置下拉框
+        self.platform_var.set(current_platform)
+        self.device_var.set(current_device)
+        self.protocol_var.set(current_protocol)
+        self.risk_level_var.set(current_risk_level)
+
+        # 清空图片和文件
+        self.clear_images()
+        self.clear_files()
+
+        # 自动聚焦到序号字段
+        self.entry_report_id.focus_set()
+
+# ==================== 主启动界面 ====================
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk, ImageFilter
+import os
+
+
+# ==================== 主启动界面 ====================
+class CyberSecurityToolkit:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("网络安全综合工具箱 2025")
+        self.root.geometry("1200x700")
+
+        # 设置窗口居中
+        self.center_window(1200, 700)
+
+        self.root.resizable(True, True)
+
+        # 设置窗口图标
+        try:
+            self.root.iconbitmap('icon.ico')
+        except:
+            pass
+
+        # 初始化背景相关变量
+        self.bg_image = None
+        self.bg_photo = None
+        self.bg_label = None
+        self.blur_intensity = 20  # 默认模糊度
+
+        # 创建菜单栏
+        self.create_menu()
+
+        # 创建控件
+        self.create_widgets()
+
+        # 绑定窗口大小变化事件
+        self.root.bind('<Configure>', self.on_window_resize)
+
+        # 尝试加载默认背景
+        self.try_load_default_bg()
+
+    def center_window(self, width, height):
+        """将窗口居中显示"""
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+    def create_menu(self):
+        """创建菜单栏"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # 视图菜单
+        view_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="视图", menu=view_menu)
+        view_menu.add_command(label="设置背景图片", command=self.set_background)
+        view_menu.add_command(label="清除背景", command=self.clear_background)
+        view_menu.add_separator()
+
+        # 模糊度子菜单
+        blur_menu = tk.Menu(view_menu, tearoff=0)
+        view_menu.add_cascade(label="背景模糊度", menu=blur_menu)
+        blur_menu.add_command(label="无模糊", command=lambda: self.set_blur(0))
+        blur_menu.add_command(label="轻度模糊", command=lambda: self.set_blur(10))
+        blur_menu.add_command(label="中度模糊", command=lambda: self.set_blur(20))
+        blur_menu.add_command(label="重度模糊", command=lambda: self.set_blur(30))
+
+        view_menu.add_separator()
+        view_menu.add_command(label="退出", command=self.root.quit)
+
+    def try_load_default_bg(self):
+        """尝试加载默认背景图片"""
+        default_paths = [
+            "background.jpg",
+            "background.png",
+            "bg.jpg",
+            "bg.png",
+            os.path.join("images", "background.jpg"),
+            os.path.join("images", "background.png")
+        ]
+
+        for path in default_paths:
+            if os.path.exists(path):
+                self.set_background(path)
+                break
+
+    def set_background(self, image_path=None):
+        """设置背景图片"""
+        if not image_path:
+            filetypes = [
+                ("图片文件", "*.jpg *.jpeg *.png *.bmp *.gif"),
+                ("所有文件", "*.*")
+            ]
+            image_path = filedialog.askopenfilename(
+                title="选择背景图片",
+                filetypes=filetypes
+            )
+            if not image_path:
+                return
+
+        try:
+            # 加载图片
+            image = Image.open(image_path)
+
+            # 获取窗口尺寸
+            window_width = self.root.winfo_width()
+            window_height = self.root.winfo_height()
+
+            # 如果窗口尺寸太小，使用默认尺寸
+            if window_width < 100 or window_height < 100:
+                window_width = 1200
+                window_height = 700
+
+            # 调整图片大小以适应窗口
+            image = image.resize((window_width, window_height), Image.Resampling.LANCZOS)
+
+            # 应用模糊效果
+            if self.blur_intensity > 0:
+                image = image.filter(ImageFilter.GaussianBlur(self.blur_intensity))
+
+            # 转换为PhotoImage
+            self.bg_photo = ImageTk.PhotoImage(image)
+
+            # 创建或更新背景标签
+            if self.bg_label:
+                self.bg_label.config(image=self.bg_photo)
+            else:
+                self.bg_label = tk.Label(self.root, image=self.bg_photo)
+                self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+                # 将背景层发送到底层
+                self.bg_label.lower()
+
+            # 保存引用防止被垃圾回收
+            self.bg_image = image
+
+        except Exception as e:
+            messagebox.showerror("错误", f"加载背景图片失败: {str(e)}")
+
+    def set_blur(self, intensity):
+        """设置模糊程度"""
+        self.blur_intensity = intensity
+        if self.bg_image:
+            # 重新加载原始图片并应用新的模糊度
+            try:
+                image_path = self.bg_image.filename
+                self.set_background(image_path)
+            except:
+                pass
+
+    def clear_background(self):
+        """清除背景图片"""
+        if self.bg_label:
+            self.bg_label.destroy()
+            self.bg_label = None
+        self.bg_image = None
+        self.bg_photo = None
+
+    def on_window_resize(self, event):
+        """窗口大小变化时重新调整背景图片"""
+        if self.bg_image and event.widget == self.root:
+            self.root.after(100, self.update_background)
+
+    def update_background(self):
+        """更新背景图片尺寸"""
+        if self.bg_image:
+            try:
+                image_path = self.bg_image.filename
+                self.set_background(image_path)
+            except:
+                pass
+
+    def create_widgets(self):
+        """创建主界面控件"""
+        # 创建主容器 - 使用Frame并设置半透明效果
+        main_frame = tk.Frame(self.root, bg='white', bd=0)
+        main_frame.place(relx=0.5, rely=0.5, anchor='center',
+                         relwidth=0.9, relheight=0.85)
+
+        # 创建圆角效果的外框
+        outer_frame = tk.Frame(main_frame, bg='#e8f4f8', bd=0)
+        outer_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # 标题部分
+        title_frame = tk.Frame(outer_frame, bg='white')
+        title_frame.pack(pady=(30, 20), fill=tk.X)
+
+        # 主标题
+        title_label = tk.Label(
+            title_frame,
+            text="网络安全综合工具箱",
+            font=("微软雅黑", 28, "bold"),
+            fg="#2c3e50",
+            bg='white'
+        )
+        title_label.pack()
+
+        # 版本标签
+        version_label = tk.Label(
+            title_frame,
+            text="v2.5 (2025)",
+            font=("微软雅黑", 12),
+            fg="#7f8c8d",
+            bg='white'
+        )
+        version_label.pack(pady=(5, 0))
+
+        # 副标题
+        subtitle_label = tk.Label(
+            title_frame,
+            text="集成多种安全工具和实用功能 - 专为安全工程师设计",
+            font=("微软雅黑", 11),
+            fg="#5d6d7e",
+            bg='white'
+        )
+        subtitle_label.pack(pady=(10, 0))
+
+        # 分隔线
+        separator = tk.Frame(outer_frame, height=2, bg="#e0e0e0")
+        separator.pack(fill=tk.X, padx=40, pady=20)
+
+        # 创建按钮网格框架
+        button_frame = tk.Frame(outer_frame, bg='white')
+        button_frame.pack(fill=tk.BOTH, expand=True, padx=40, pady=10)
+
+        # 定义工具列表（新增IP提取工具）
+        tools = [
+            ("📋 IP提取工具", self.open_ip_extractor, "#3498db", "多文件IP提取、白名单过滤、黑名单转换、解封过滤"),
+            ("🔍 目录扫描", self.open_dir_scanner, "#2ecc71", "异步目录/文件扫描器"),
+            ("🔌 端口扫描", self.open_port_scanner, "#e74c3c", "Web端口探测工具"),
+            ("🔧 编码转换", self.open_encode_converter, "#9b59b6", "编码/哈希/加密工具"),
+            ("🌐 域名枚举", self.open_subdomain_scanner, "#1abc9c", "子域名枚举工具"),
+            ("🗺️ 空间测绘", self.open_asset_mapping, "#f39c12", "网络空间资产测绘"),
+            ("📁 本地工具箱", self.open_local_toolbox, "#34495e", "路径管理/CMD快速打开"),
+            ("📊 安全事件", self.open_security_event, "#e67e22", "安全事件录入系统"),
+            ("⚡ 关于", self.show_about, "#7f8c8d", "关于本工具箱")
+        ]
+
+        # 创建按钮
+        buttons = []
+        row, col = 0, 0
+        for i, (text, command, color, tooltip) in enumerate(tools):
+            # 创建按钮
+            btn = tk.Button(
+                button_frame,
+                text=text,
+                command=command,
+                font=("微软雅黑", 12),
+                bg='white',
+                fg=color,
+                activebackground=color,
+                activeforeground="white",
+                relief=tk.FLAT,
+                padx=20,
+                pady=15,
+                cursor="hand2",
+                borderwidth=1,
+                highlightthickness=0
+            )
+            btn.grid(row=row, column=col, padx=10, pady=10, sticky="nsew", ipadx=10, ipady=5)
+
+            # 设置按钮样式
+            btn.config(
+                highlightbackground=color,
+                highlightcolor=color,
+                highlightthickness=1
+            )
+
+            # 添加悬停效果
+            def on_enter(e, b=btn, c=color):
+                b.config(bg=c, fg="white")
+
+            def on_leave(e, b=btn, c=color):
+                b.config(bg="white", fg=c)
+
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+
+            # 添加工具提示
+            self.create_tooltip(btn, tooltip)
+            buttons.append(btn)
+
+            col += 1
+            if col >= 4:
+                col = 0
+                row += 1
+
+        # 配置网格权重
+        for i in range(4):
+            button_frame.columnconfigure(i, weight=1)
+        for i in range(3):
+            button_frame.rowconfigure(i, weight=1)
+
+        # 底部状态栏
+        status_frame = tk.Frame(outer_frame, bg='white', height=40)
+        status_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=10)
+
+        # 状态文本
+        self.status_var = tk.StringVar(value="就绪 - 点击上方按钮使用工具")
+        status_label = tk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            font=("微软雅黑", 10),
+            fg="#7f8c8d",
+            bg='white',
+            anchor='w'
+        )
+        status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 版权信息
+        copyright_label = tk.Label(
+            status_frame,
+            text="© 2025 网络安全工具箱 | 仅供学习和授权测试使用",
+            font=("微软雅黑", 9),
+            fg="#bdc3c7",
+            bg='white',
+            anchor='e'
+        )
+        copyright_label.pack(side=tk.RIGHT)
+
+    def create_tooltip(self, widget, text):
+        """创建简单的工具提示"""
+
+        def enter(event):
+            self.status_var.set(text)
+
+        def leave(event):
+            self.status_var.set("就绪 - 点击上方按钮使用工具")
+
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+
+    def open_ip_extractor(self):
+        """打开IP提取工具"""
+        window = tk.Toplevel(self.root)
+        window.title("IP提取工具")
+        window.geometry("1200x900")
+        TabbedIPExtractorApp(window)
+
+    def open_dir_scanner(self):
+        """打开目录扫描器"""
+        window = tk.Toplevel(self.root)
+        window.title("目录扫描器 - 异步优化版")
+        window.geometry("960x720")
+        AsyncDirScannerGUI(window)
+
+    def open_port_scanner(self):
+        """打开端口扫描器"""
+        window = tk.Toplevel(self.root)
+        window.title("Web端口探测工具")
+        window.geometry("900x680")
+        WebPortScannerGUI(window)
+
+    def open_encode_converter(self):
+        """打开编码转换工具"""
+        window = tk.Toplevel(self.root)
+        window.title("多功能转换工具")
+        window.geometry("1100x780")
+        EncodeConverterGUI(window)
+
+    def open_subdomain_scanner(self):
+        """打开域名枚举工具"""
+        window = tk.Toplevel(self.root)
+        window.title("子域名枚举工具")
+        window.geometry("780x580")
+        SubdomainScannerGUI(window)
+
+    def open_asset_mapping(self):
+        """打开空间测绘工具"""
+        window = tk.Toplevel(self.root)
+        window.title("网络空间测绘工具")
+        window.geometry("1200x850")
+        AssetMappingTool(window)
+
+    def open_local_toolbox(self):
+        """打开本地工具箱"""
+        window = tk.Toplevel(self.root)
+        window.title("路径管理 & 快速打开CMD / 运行文件")
+        window.geometry("880x580")
+        LocalToolboxGUI(window)
+
+    def open_security_event(self):
+        """打开安全事件生成器"""
+        window = tk.Toplevel(self.root)
+        window.title("安全事件录入系统")
+        window.geometry("1200x800")
+        SecurityEventApp(window)
+
+    def show_about(self):
+        """显示关于对话框"""
+        about_window = tk.Toplevel(self.root)
+        about_window.title("关于网络安全综合工具箱")
+        about_window.geometry("500x400")
+        about_window.resizable(False, False)
+        about_window.transient(self.root)
+        about_window.grab_set()
+
+        main_frame = ttk.Frame(about_window, padding="30")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = ttk.Label(
+            main_frame,
+            text="网络安全综合工具箱",
+            font=("微软雅黑", 18, "bold"),
+            foreground="#2c3e50"
+        )
+        title_label.pack(pady=(0, 10))
+
+        version_label = ttk.Label(
+            main_frame,
+            text="版本: 2.5.0 (2025)",
+            font=("微软雅黑", 12),
+            foreground="#7f8c8d"
+        )
+        version_label.pack(pady=(0, 20))
+
+        features = [
+            "✓ IP提取工具 - 多文件导入、白名单过滤、黑名单转换、解封过滤",
+            "✓ 异步目录扫描 - 高效快速的网站目录发现",
+            "✓ 端口扫描 - 支持并发的大规模端口探测",
+            "✓ 编码/加密工具 - Base64、Hex、URL、AES、RSA等",
+            "✓ 子域名枚举 - 快速发现目标子域名",
+            "✓ 网络空间测绘 - 集成多个测绘引擎API",
+            "✓ 本地工具箱 - 快速打开常用目录和文件",
+            "✓ 安全事件生成 - 自动化的安全事件报告系统"
+        ]
+        for feature in features:
+            lbl = ttk.Label(
+                main_frame,
+                text=feature,
+                font=("微软雅黑", 10),
+                anchor="w"
+            )
+            lbl.pack(fill=tk.X, pady=2)
+
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
+
+        copyright_label = ttk.Label(
+            main_frame,
+            text="Copyright © 2025 网络安全综合工具箱\n仅供学习和授权测试使用，请遵守相关法律法规",
+            font=("微软雅黑", 9),
+            foreground="#95a5a6",
+            justify=tk.CENTER
+        )
+        copyright_label.pack()
+
+        ttk.Button(
+            main_frame,
+            text="关闭",
+            command=about_window.destroy,
+            width=15
+        ).pack(pady=(20, 0))
+
+
+# ==================== 程序入口 ====================
+def main():
+    root = tk.Tk()
+    try:
+        root.iconbitmap('icon.ico')
+    except:
+        pass
+    app = CyberSecurityToolkit(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
